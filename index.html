@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Correntes Oceânicas — Mapa de Fluxo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="stage">
+    <canvas id="base"></canvas>
+    <canvas id="flow"></canvas>
+    <canvas id="route"></canvas>
+
+    <div id="brand">
+      <strong>Correntes Oceânicas de Superfície</strong>
+      <span>Copernicus Marine · projeção equiretangular</span>
+    </div>
+    <div id="readout"></div>
+
+    <div id="warn" hidden>Sem internet: o contorno dos continentes não pôde ser carregado.</div>
+
+    <div id="panel">
+      <div class="grp-h">Camadas</div>
+      <label><input type="checkbox" id="t-sst" /> <span>Temperatura do mar</span></label>
+      <label><input type="checkbox" id="t-curr" checked /> <span>Correntes (fluxo)</span></label>
+      <label><input type="checkbox" id="t-grat" checked /> <span>Grade de coordenadas</span></label>
+      <label class="rng">Velocidade do fluxo
+        <input type="range" id="t-speed" min="3" max="30" value="16" />
+      </label>
+      <label class="rng" id="day-wrap" hidden>Dia dos dados
+        <select id="t-day"></select>
+      </label>
+
+      <div class="grp-h">Vista</div>
+      <div class="row">
+        <button id="z-out" title="Afastar">&minus;</button>
+        <button id="z-in" title="Aproximar">+</button>
+        <button id="z-reset">Ver tudo</button>
+      </div>
+      <button id="t-reseed">Repovoar partículas</button>
+
+      <div class="grp-h">Navegação</div>
+      <div class="row">
+        <button id="r-pick">Traçar rota</button>
+        <button id="r-clear">Limpar</button>
+      </div>
+      <label class="rng">Velocidade do navio: <b id="r-kn">18</b> nós
+        <input type="range" id="r-speed" min="6" max="40" value="18" />
+      </label>
+      <div id="r-info" class="rinfo"></div>
+
+      <div class="grp-h">Dados</div>
+      <button id="d-update">Atualizar correntes (Copernicus)</button>
+      <div id="d-status" class="rinfo"></div>
+
+      <div class="hint">arraste para mover &middot; scroll = zoom &middot; duplo&#8209;clique aproxima</div>
+    </div>
+
+    <div id="legend">
+      <div class="lg-block" id="lg-currents">
+        <div class="lg-title">Correntes</div>
+        <div class="lg-swatches">
+          <span data-c="cold">frias</span><span data-c="mild">amenas</span><span data-c="warm">quentes</span>
+        </div>
+        <div class="lg-speed">
+          <i class="s1"></i><i class="s2"></i><i class="s3"></i>
+          <em>lento&nbsp;→&nbsp;rápido</em>
+        </div>
+      </div>
+      <div class="lg-block" id="lg-sst" hidden>
+        <div class="lg-title">Temperatura da superfície (°C)</div>
+        <canvas id="lg-sst-bar" width="200" height="9"></canvas>
+        <div class="lg-ticks"><span>&minus;2</span><span>10</span><span>22</span><span>32</span></div>
+      </div>
+    </div>
+
+    <div id="attrib">Fonte: Copernicus Marine Service &mdash; GLOBAL_ANALYSISFORECAST_PHY_001_024</div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+  <script src="world-land.js"></script>
+  <script src="ocean-data.js"></script>
+  <script src="dados-marinhos.js"></script>
+  <script src="script.js" defer></script>
+</body>
+</html>
