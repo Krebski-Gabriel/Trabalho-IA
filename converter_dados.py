@@ -14,10 +14,9 @@ Saida: uma grade regular lat/lon por dia disponivel na fonte. Celulas de terra
 import sys, os, io, base64, struct, math
 import numpy as np
 
-# fonte padrao: o .nc regional com uo/vo reais (6 dias, costa SP/RJ/ES)
 DEFAULT_SRC = os.path.join("teste", "projeto_oceano_ia", "dados_maritimos.nc")
 OUT = "dados-marinhos.js"
-SCALE = 1000          # m/s -> milesimos de m/s, guardado como int16
+SCALE = 1000
 
 
 # ----------------------------------------------------------------------
@@ -81,7 +80,6 @@ def write_js(lats, lons, tlabels, frames, depth, origin):
 # leitura das fontes -> (lats asc, lons asc, tlabels, frames[(u64,v64)], depth)
 # ----------------------------------------------------------------------
 def _fix_lon(lons, *grids):
-    """0..360 -> -180..180 e ordena crescente; aplica a mesma ordem aos grids."""
     lons = np.asarray(lons, dtype="float64")
     if lons.max() > 180.0:
         lons = ((lons + 180.0) % 360.0) - 180.0
@@ -123,7 +121,7 @@ def load_nc(path):
         V = vo.values.astype("float64")[None, ...]
         tlabels = ["dado"]
 
-    if lats[0] > lats[-1]:                       # garante sul -> norte
+    if lats[0] > lats[-1]:
         lats = lats[::-1]
         U = U[:, ::-1, :]
         V = V[:, ::-1, :]
@@ -141,7 +139,7 @@ def load_xlsx(path):
     for c in ("time", "depth", "latitude", "longitude"):
         df[c] = df[c].ffill()
     df["time"] = pd.to_datetime(df["time"])
-    df = df[df["depth"] == df["depth"].min()]        # so a camada mais rasa
+    df = df[df["depth"] == df["depth"].min()]
 
     lats = np.sort(df["latitude"].unique()).astype("float64")
     lons = np.sort(df["longitude"].unique()).astype("float64")

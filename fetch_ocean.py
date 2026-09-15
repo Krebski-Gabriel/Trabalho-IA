@@ -19,14 +19,13 @@ O formato de saída é sempre o mesmo, então o site não muda.
 import argparse, base64, io, os, struct, sys, urllib.request, urllib.parse, csv, datetime
 
 OUT = "ocean-data.js"
-CUR_STEP = 0.5      # grau, resolução final das correntes
-SST_STEP = 1.0      # grau, resolução final da SST
-LAT_LIM = 79.5      # corta perto dos polos
+CUR_STEP = 0.5
+SST_STEP = 1.0
+LAT_LIM = 79.5
 
-# opcoes preenchidas em __main__ (usadas por from_copernicus)
-OPT_DATE = None       # "YYYY-MM-DD" ou None = hoje
-OPT_NO_SST = False    # nao baixar temperatura
-OPT_KEEP_NC = False   # manter os .nc baixados em vez de apagar
+OPT_DATE = None
+OPT_NO_SST = False
+OPT_KEEP_NC = False
 
 CUR_DATASET = "cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m"
 SST_DATASET = "cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m"
@@ -201,9 +200,9 @@ def coarsen(da, step):
     lat = np.asarray(da["latitude"].values, dtype="float64")
     lon = np.asarray(da["longitude"].values, dtype="float64")
     arr = np.nan_to_num(np.asarray(da.values, dtype="float64"), nan=0.0)
-    if lat[0] > lat[-1]:                       # garante sul -> norte
+    if lat[0] > lat[-1]:
         lat = lat[::-1]; arr = arr[::-1, :]
-    if lon.max() > 180:                        # 0..360 -> -180..180
+    if lon.max() > 180:
         lon = ((lon + 180.0) % 360.0) - 180.0
         order = np.argsort(lon)
         lon = lon[order]; arr = arr[:, order]
@@ -225,7 +224,7 @@ def _ensure_login(cm):
         return
     print("\nPrimeiro uso: e preciso logar no Copernicus Marine")
     print("(conta gratuita em https://marine.copernicus.eu — botao Register)\n")
-    cm.login()   # pergunta usuario/senha e salva; nao pede de novo
+    cm.login()
 
 
 def _recent_dates(start):
@@ -261,7 +260,7 @@ def from_copernicus():
                 if os.path.exists(fname):
                     return d
                 last = "arquivo nao apareceu"
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 last = e
         raise SystemExit(f"nao consegui baixar {dsid}\n  detalhe: {last}")
 
@@ -274,7 +273,7 @@ def from_copernicus():
         except SystemExit as e:
             print("  (SST falhou, seguindo sem ela)", e)
 
-    from_localnc()     # coarsen + escreve ocean-data.js
+    from_localnc()
 
     if not OPT_KEEP_NC:
         for f in ("correntes_global.nc", "temperatura_global.nc"):

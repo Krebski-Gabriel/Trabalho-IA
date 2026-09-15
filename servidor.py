@@ -60,7 +60,6 @@ def _run_update(extra_args):
         rc = p.returncode
 
         if rc == 0:
-            # se ainda ha dados regionais na frente, guarda pra ver o global novo
             reg = ROOT / "dados-marinhos.js"
             bak = ROOT / "dados-marinhos_regional.js"
             if reg.exists() and not bak.exists():
@@ -71,7 +70,7 @@ def _run_update(extra_args):
         with _lock:
             _job.update(state=("done" if rc == 0 else "error"),
                         rc=rc, finished=time.time())
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         with _lock:
             _job.update(state="error", finished=time.time())
             _job["log"].append("ERRO: " + str(e))
@@ -122,12 +121,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return self._json(202, {"ok": True})
 
     def end_headers(self):
-        # nao deixa o navegador guardar os .js gerados
         if self.path.endswith((".js", ".json")):
             self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
-    def log_message(self, *a):  # silencia o log de acesso
+    def log_message(self, *a):
         pass
 
 

@@ -44,7 +44,6 @@ body {
 #flow.picking { cursor: crosshair; }
 #route { z-index: 3; pointer-events: none; }
 
-/* moldura sutil sobre o mapa */
 #stage::after {
   content: "";
   position: absolute;

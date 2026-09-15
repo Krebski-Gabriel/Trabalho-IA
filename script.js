@@ -2,10 +2,6 @@
 
 /* ============================================================
    Correntes Oceânicas — mapa de fluxo estilo "earth"
-   Fundo  = temperatura da superfície do mar (modelo)
-   Fluxo  = campo de correntes reconstruído a partir de correntes
-            nomeadas, cada uma com VELOCIDADE e LARGURA próprias
-   Biblioteca: D3 (projeção / desenho geográfico)
    ============================================================ */
 
 /* ---------- DOM ---------- */
@@ -24,30 +20,30 @@ const CFG = { fade: 0.042, speed: 0.16, stepCap: 0.9, density: 360, minP: 1400, 
 
 /* ---------- paleta cartográfica (tons suaves, estilo atlas) ---------- */
 const MAP = {
-  ocean:    '#d4e6ee',            // mar — azul-acinzentado claro
-  land:     '#bdd2a4',            // terra — verde suave de mapa
+  ocean:    '#d4e6ee',
+  land:     '#bdd2a4',
   landLine: 'rgba(96,120,78,0.55)',
-  landShadow: 'rgba(38,58,46,0.32)',   // sombra da terra sobre o mar
-  grat:     'rgba(66,92,108,0.11)',      // grade fininha
+  landShadow: 'rgba(38,58,46,0.32)',
+  grat:     'rgba(66,92,108,0.11)',
   flow:     '20,66,116',
   route:    '#123f7d',
-  ice:      '#f5f7f7',            // calota de gelo (Antártida)
+  ice:      '#f5f7f7',
   iceLine:  'rgba(150,170,182,0.6)',
 };
-const TW = 512, TH = 256;   // grade de temperatura
-const MW = 1024, MH = 512;  // máscara de terra
-const FW = 360, FH = 180;   // grade do campo de correntes (1°)
+const TW = 512, TH = 256;
+const MW = 1024, MH = 512;
+const FW = 360, FH = 180;
 
 /* ---------- estado ---------- */
 let W = 0, H = 0, DPR = 1;
 let proj = null, geoPath = null;
-let scaleK = 0, originX = 0, originY = 0, baseK = 1, Z = 1; // vista: zoom (Z) e deslocamento (originX/Y)
+let scaleK = 0, originX = 0, originY = 0, baseK = 1, Z = 1;
 let land = null;
 let landData = null;
-let iceCaps = null;   // GeoJSON só com a Antártida (desenhada como gelo)
+let iceCaps = null;
 const tempGrid = new Float32Array(TW * TH);
-const FIELD = new Float32Array(FW * FH * 2);   // (u,v) das correntes nomeadas
-const SPD = new Float32Array(FW * FH);         // |velocidade| estruturada
+const FIELD = new Float32Array(FW * FH * 2);
+const SPD = new Float32Array(FW * FH);
 const sstCanvas = document.createElement('canvas');
 const sctx = sstCanvas.getContext('2d');
 let sstReady = false;
@@ -57,27 +53,25 @@ let phase = 0, lastT = performance.now(), rafId = 0;
 let graticule = d3.geoGraticule10();
 
 /* ---------- estado da rota ---------- */
-const SHIP = { kn: 18 };            // velocidade do navio em águas paradas (nós)
-let routeA = null, routeB = null;   // [lon, lat]
-let routePath = null;               // [[lon,lat], ...]
-let routeMode = null;               // null | 'A' | 'B'
+const SHIP = { kn: 18 };
+let routeA = null, routeB = null;
+let routePath = null;
+let routeMode = null;
 let lastRouteClick = 0;
-let NAV = null;                     // grade de navegabilidade (1 = oceano)
-let NRES = 1;                       // graus por célula da grade de navegação
+let NAV = null;
+let NRES = 1;
 let NLON = Math.round(360 / NRES);
 let NLAT = Math.round(180 / NRES) + 1;
-let N_LON0 = -180, N_LAT0 = 90;     // coordenada geográfica do índice 0 da grade
-let N_WRAP = true;                  // true = longitude dá a volta ao mundo (mapa global)
+let N_LON0 = -180, N_LAT0 = 90;
+let N_WRAP = true;
 const KMH_PER_KN = 1.852;
 
-/* ---------- dados oceânicos reais (NOAA CoastWatch), se ocean-data.js existir ----------
-   OD.U/OD.V = corrente de superfície em m/s ; OD.T = SST em °C
-   grades regulares lat/lon:  c = correntes, s = SST  (nlon,nlat,lon0,lat0,dlon,dlat) */
-let OD = null;                       // dados de corrente ativos (m/s)
-let ODB = null;                      // {lon0,lon1,lat0,lat1} — limites da região com dados reais (só regional)
-let MD = null;                       // window.MARINE_DATA bruto (vários dias)
-let curDay = 0;                      // índice do dia selecionado nos dados regionais
-const SST_MIN = -2, SST_MAX = 32;   // faixa (°C) para a paleta de cores
+/* ---------- dados oceânicos reais (NOAA CoastWatch), se ocean-data.js existir ---------- */
+let OD = null;
+let ODB = null;
+let MD = null;
+let curDay = 0;
+const SST_MIN = -2, SST_MAX = 32;
 
 function b64ToI16(s) {
   const bin = atob(s);
@@ -86,7 +80,6 @@ function b64ToI16(s) {
   return new Int16Array(bytes.buffer);
 }
 
-// dados globais (ocean-data.js, formato antigo): corrente + SST reais
 function decodeOceanData() {
   const src = window.OCEAN_DATA;
   if (!src) return null;
@@ -94,7 +87,7 @@ function decodeOceanData() {
   const U = new Float32Array(cu.length), V = new Float32Array(cv.length);
   for (let i = 0; i < cu.length; i++) { U[i] = cu[i] / 1000; V[i] = cv[i] / 1000; }
   let T = null;
-  if (src.sst && src.sst.t) {                       // SST real é opcional
+  if (src.sst && src.sst.t) {
     const st = b64ToI16(src.sst.t);
     T = new Float32Array(st.length);
     for (let i = 0; i < st.length; i++) T[i] = st[i] / 100;
@@ -102,7 +95,6 @@ function decodeOceanData() {
   return { U, V, T, c: src.cur, s: src.sst || null, source: src.source, regional: false };
 }
 
-// dados regionais reais (dados-marinhos.js -> converter_dados.py): só corrente, um ou mais dias
 function decodeMarine(day) {
   const src = window.MARINE_DATA;
   if (!src || !src.frames || !src.frames.length) return null;
@@ -113,7 +105,6 @@ function decodeMarine(day) {
   return { U, V, T: null, c: src.grid, s: null, source: src.source, regional: true };
 }
 
-// limites geográficos cobertos por uma grade regular
 function regionBounds(g) {
   return {
     lon0: g.lon0, lon1: g.lon0 + (g.nlon - 1) * g.dlon,
@@ -121,7 +112,6 @@ function regionBounds(g) {
   };
 }
 
-// amostra bilinear de uma grade regular (lon com wrap, lat com clamp)
 function sampleGrid(arr, g, lon, lat) {
   let x = (lon - g.lon0) / g.dlon;
   x = ((x % g.nlon) + g.nlon) % g.nlon;
@@ -138,10 +128,6 @@ function sampleGrid(arr, g, lon, lat) {
 
 /* ============================================================
    CORRENTES OCEÂNICAS
-   speed: velocidade relativa (rápido ~3.0, lento ~0.45)
-   width: meia-largura de influência em graus
-   pts:   [lon, lat] NA ORDEM DO FLUXO (longitudes podem passar
-          de ±180 para atravessar o Pacífico de forma contínua)
    ============================================================ */
 const CURRENTS = [
   /* ----- Atlântico ----- */
@@ -211,18 +197,16 @@ const CURRENTS = [
           [175,-56],[200,-57]] },
 ];
 
-/* ---------- circulação de fundo: giros das bacias (lenta, preenche o oceano)
-   dir: -1 = horário (giros subtropicais do Hemisfério Norte)
-        +1 = anti-horário (subtropicais do Sul; subpolares do Norte)          */
+/* ---------- circulação de fundo: giros das bacias ---------- */
 const BG_GYRES = [
-  { lon: -45,  lat: 30,  rx: 34, ry: 17, dir: -1, s: 1.15 }, // Atlântico Norte
-  { lon: -175, lat: 30,  rx: 52, ry: 19, dir: -1, s: 1.15 }, // Pacífico Norte
-  { lon: -16,  lat: -25, rx: 24, ry: 17, dir:  1, s: 1.10 }, // Atlântico Sul
-  { lon: -125, lat: -27, rx: 55, ry: 19, dir:  1, s: 1.10 }, // Pacífico Sul
-  { lon: 75,   lat: -28, rx: 34, ry: 17, dir:  1, s: 1.10 }, // Índico Sul
-  { lon: -35,  lat: 56,  rx: 20, ry: 11, dir:  1, s: 0.75 }, // Atlântico Norte subpolar
-  { lon: -165, lat: 53,  rx: 26, ry: 12, dir:  1, s: 0.70 }, // giro do Alasca / Bering
-  { lon: 66,   lat: 12,  rx: 16, ry: 9,  dir: -1, s: 0.55 }, // monção (Índico Norte)
+  { lon: -45,  lat: 30,  rx: 34, ry: 17, dir: -1, s: 1.15 },
+  { lon: -175, lat: 30,  rx: 52, ry: 19, dir: -1, s: 1.15 },
+  { lon: -16,  lat: -25, rx: 24, ry: 17, dir:  1, s: 1.10 },
+  { lon: -125, lat: -27, rx: 55, ry: 19, dir:  1, s: 1.10 },
+  { lon: 75,   lat: -28, rx: 34, ry: 17, dir:  1, s: 1.10 },
+  { lon: -35,  lat: 56,  rx: 20, ry: 11, dir:  1, s: 0.75 },
+  { lon: -165, lat: 53,  rx: 26, ry: 12, dir:  1, s: 0.70 },
+  { lon: 66,   lat: 12,  rx: 16, ry: 9,  dir: -1, s: 0.55 },
 ];
 
 /* ---------- turbulência de meso-escala (leve, some nas zonas calmas) ---------- */
@@ -243,9 +227,7 @@ function streamTurb(lon, lat, ph) {
   return [7 * dpa, -7 * dpl];
 }
 
-/* ---------- paleta de temperatura (LUT de 256 cores) ----------
-   ramp claro azul(frio) -> neutro -> vermelho(quente), no mesmo
-   registro visual do mapa (fundo claro, tons suaves) */
+/* ---------- paleta de temperatura (LUT de 256 cores) ---------- */
 const LUT = new Uint8Array(256 * 3);
 (function buildLUT() {
   const stops = [0,        0.14,      0.3,       0.46,      0.54,      0.68,      0.83,      1];
@@ -287,7 +269,7 @@ function viewBounds() {
 
 function setZoom(nz, px, py) {
   const zmax = (OD && OD.regional) ? 120 : 16;
-  const zmin = (OD && OD.regional) ? 1 : Math.min(1, (W / 360) / baseK);   // deixa dar zoom-out até ver o mundo todo
+  const zmin = (OD && OD.regional) ? 1 : Math.min(1, (W / 360) / baseK);
   nz = Math.max(zmin, Math.min(zmax, nz));
   const f = (nz * baseK) / scaleK;
   scaleK = nz * baseK;
@@ -301,14 +283,14 @@ function setZoom(nz, px, py) {
 }
 
 function resetView() {
-  if (OD && OD.regional && ODB) {          // "ver tudo" = reenquadra a região com dados reais
+  if (OD && OD.regional && ODB) {
     fitRegion(ODB);
     fctx.clearRect(0, 0, W, H);
     drawBase();
     drawRoute();
     return;
   }
-  scaleK = W / 360; Z = scaleK / baseK;          // "ver tudo" = mundo inteiro visível
+  scaleK = W / 360; Z = scaleK / baseK;
   originX = 0;
   originY = (H - 180 * scaleK) / 2;
   clampView();
@@ -318,7 +300,6 @@ function resetView() {
   drawRoute();
 }
 
-// enquadra a vista nos limites b = {lon0,lon1,lat0,lat1}
 function fitRegion(b) {
   const lonSpan = Math.max(0.5, b.lon1 - b.lon0);
   const latSpan = Math.max(0.5, b.lat1 - b.lat0);
@@ -333,7 +314,6 @@ function fitRegion(b) {
   updateProj();
 }
 
-// seletor de dia (só aparece quando os dados regionais têm mais de um dia)
 function setupDaySelector() {
   const wrap = document.getElementById('day-wrap');
   const sel = document.getElementById('t-day');
@@ -409,7 +389,6 @@ function buildLandMask() {
 /* ---------- campo de correntes ---------- */
 function prepCurrents() {
   for (const c of CURRENTS) {
-    // longitudes contínuas (sem saltos > 180 entre vértices vizinhos)
     for (let i = 1; i < c.pts.length; i++) {
       const d = c.pts[i][0] - c.pts[i - 1][0];
       if (d > 180) c.pts[i][0] -= 360;
@@ -430,7 +409,6 @@ function buildField() {
 
       for (let ci = 0; ci < CURRENTS.length; ci++) {
         const c = CURRENTS[ci];
-        // aproxima a longitude da consulta ao intervalo desta corrente
         let lon = baseLon;
         const dm = c.meanLon - lon;
         if (dm > 180) lon += 360;
@@ -456,7 +434,6 @@ function buildField() {
         if (w > 0.01) { u += tu * c.speed * w; v += tv * c.speed * w; }
       }
 
-      // circulação de fundo dos giros
       for (let gi = 0; gi < BG_GYRES.length; gi++) {
         const G = BG_GYRES[gi];
         let dlon = baseLon - G.lon;
@@ -483,8 +460,8 @@ function buildField() {
 function sampleField(lon, lat) {
   if (OD) {
     if (ODB && (lon < ODB.lon0 || lon > ODB.lon1 || lat < ODB.lat0 || lat > ODB.lat1))
-      return [0, 0];                                    // fora da região coberta pelos dados reais
-    return [sampleGrid(OD.U, OD.c, lon, lat), sampleGrid(OD.V, OD.c, lon, lat)]; // m/s (dados reais)
+      return [0, 0];
+    return [sampleGrid(OD.U, OD.c, lon, lat), sampleGrid(OD.V, OD.c, lon, lat)];
   }
   let x = ((((lon + 180) % 360) + 360) % 360);
   let y = (90 - lat) * (FH / 180);
@@ -511,7 +488,6 @@ function sampleSPD(lon, lat) {
   return SPD[y * FW + x];
 }
 
-// vetor de corrente total (campo + turbulência) — usado no movimento e na leitura
 function currentAt(lon, lat, ph) {
   const f = sampleField(lon, lat);
   const tb = streamTurb(lon, lat, ph);
@@ -521,7 +497,7 @@ function currentAt(lon, lat, ph) {
 
 /* ---------- grade de temperatura ---------- */
 function buildTempGrid() {
-  if (OD && OD.T) {                          // SST real -> normaliza p/ a paleta
+  if (OD && OD.T) {
     for (let j = 0; j < TH; j++) {
       const lat = 90 - (j + 0.5) / TH * 180;
       for (let i = 0; i < TW; i++) {
@@ -599,7 +575,6 @@ function sampleTemp(lon, lat) {
 /* ---------- partículas ---------- */
 function resetParticle(p) {
   if (CURRENTS.length && !(OD && OD.regional) && Math.random() < 0.4) {
-    // nasce sobre uma corrente (mais densidade onde há fluxo)
     const c = CURRENTS[(Math.random() * CURRENTS.length) | 0];
     const k = (Math.random() * (c.pts.length - 1)) | 0;
     const tt = Math.random();
@@ -609,7 +584,6 @@ function resetParticle(p) {
     p.lon = lon;
     p.lat = lat > 84 ? 84 : lat < -84 ? -84 : lat;
   } else {
-    // nasce dentro da área visível (mantém densidade ao dar zoom)
     const b = viewBounds();
     for (let k = 0; k < 25; k++) {
       let lon = b.lon0 + Math.random() * (b.lon1 - b.lon0);
@@ -635,16 +609,12 @@ function seedParticles() {
   fctx.clearRect(0, 0, W, H);
 }
 
-// 3 faixas de velocidade x 3 de temperatura (buckets p/ desenhar)
 const SEGS = [[], [], [], [], [], [], [], [], []];
-// no modo MAPA, a cor da corrente = temperatura da água (quente laranja / morno âmbar / frio azul)
-const TEMPCOL = ['232,104,44', '226,158,46', '20,86,170'];   // [quente, morno, frio]
-// no modo CALOR, o fundo já mostra a temperatura -> corrente num tom escuro único
+const TEMPCOL = ['232,104,44', '226,158,46', '20,86,170'];
 const DARKFLOW = '10,26,54';
-// OPACIDADE e ESPESSURA = velocidade: lento = fino/apagado, rápido = grosso/forte
 const S_ALPHA = [0.32, 0.62, 0.98];
 const S_WIDTH = [0.8, 1.5, 2.5];
-const FLOW_CORE = 'rgba(255,252,244,0.55)';   // brilho no miolo das correntes rápidas
+const FLOW_CORE = 'rgba(255,252,244,0.55)';
 
 function frame(now) {
   rafId = requestAnimationFrame(frame);
@@ -663,15 +633,14 @@ function frame(now) {
   for (let s = 0; s < 9; s++) SEGS[s].length = 0;
 
   const cap = CFG.stepCap * dt;
-  const gamma = OD ? 1.0 : 1.12;                       // dados reais já em m/s
+  const gamma = OD ? 1.0 : 1.12;
   const calm = OD ? 0.03 : 0.05;
-  const sFast = OD ? 0.85 : 1.7, sMid = OD ? 0.28 : 0.7; // limiares das faixas de velocidade
+  const sFast = OD ? 0.85 : 1.7, sMid = OD ? 0.28 : 0.7;
 
   for (let i = 0; i < particles.length; i++) {
     const p = particles[i];
 
     const f = sampleField(p.lon, p.lat);
-    // fora da região com dados reais não há corrente nem turbulência: a partícula recicla
     const inReg = !ODB || (p.lon >= ODB.lon0 && p.lon <= ODB.lon1 &&
                            p.lat >= ODB.lat0 && p.lat <= ODB.lat1);
     const tb = inReg ? streamTurb(p.lon, p.lat, phase) : [0, 0];
@@ -682,7 +651,6 @@ function frame(now) {
     const v = f[1] + tb[1] * g;
     const sp = Math.hypot(u, v);
 
-    // só o "olho" do giro (praticamente parado) recicla rápido
     p.age += dt * (ls < calm ? 2.2 : 1);
 
     if (sp < 1e-4 || p.age > p.maxAge) { resetParticle(p); continue; }
@@ -701,7 +669,7 @@ function frame(now) {
     const a = project(p.lon, p.lat);
     const b = project(nlon, nlat);
     const t = sampleTemp(nlon, nlat);
-    const tcls = t > 0.55 ? 0 : (t < 0.37 ? 2 : 1);     // quente / morno / frio
+    const tcls = t > 0.55 ? 0 : (t < 0.37 ? 2 : 1);
     const scls = sp > sFast ? 2 : (sp > sMid ? 1 : 0);
     SEGS[scls * 3 + tcls].push(a[0], a[1], b[0], b[1]);
 
@@ -712,7 +680,7 @@ function frame(now) {
   fctx.lineJoin = 'round';
   for (let sc = 0; sc < 3; sc++) {
     fctx.lineWidth = S_WIDTH[sc];
-    for (let tc = 0; tc < 3; tc++) {          // cor pela temperatura (modo mapa), opacidade pela velocidade
+    for (let tc = 0; tc < 3; tc++) {
       const s = SEGS[sc * 3 + tc];
       if (!s.length) continue;
       fctx.strokeStyle = 'rgba(' + (showSST ? DARKFLOW : TEMPCOL[tc]) + ',' + S_ALPHA[sc] + ')';
@@ -723,7 +691,7 @@ function frame(now) {
       }
       fctx.stroke();
     }
-    if (sc === 2) {                           // miolo claro nas correntes rápidas -> "veio" de água
+    if (sc === 2) {
       fctx.lineWidth = Math.max(0.5, S_WIDTH[sc] - 1.4);
       fctx.strokeStyle = FLOW_CORE;
       fctx.beginPath();
@@ -742,7 +710,7 @@ function frame(now) {
 /* ---------- camada base (SST + grade + terra) ---------- */
 function drawBase() {
   bctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  bctx.fillStyle = showSST ? '#e9eef2' : MAP.ocean;   // fundo cobre a tela toda (sem tarja)
+  bctx.fillStyle = showSST ? '#e9eef2' : MAP.ocean;
   bctx.fillRect(0, 0, W, H);
 
   if (showSST && sstReady) {
@@ -761,7 +729,6 @@ function drawBase() {
   }
 
   if (land) {
-    // sombra da terra sobre o mar (dá relevo), depois o preenchimento nítido
     bctx.save();
     bctx.beginPath();
     geoPath(land);
@@ -781,7 +748,7 @@ function drawBase() {
     bctx.stroke();
   }
 
-  if (iceCaps) {                    // Antártida = calota de gelo, não terra
+  if (iceCaps) {
     bctx.beginPath();
     geoPath(iceCaps);
     bctx.fillStyle = MAP.ice;
@@ -810,7 +777,7 @@ function resize() {
   fctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   rctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 
-  baseK = Math.max(W / 360, H / 180);            // "cover": o mapa preenche a tela toda (sem tarja)
+  baseK = Math.max(W / 360, H / 180);
   if (!hadView) {
     scaleK = baseK; Z = 1;
     originX = (W - 360 * scaleK) / 2;
@@ -826,9 +793,7 @@ function resize() {
   drawRoute();
 }
 
-/* ---------- carregamento dos continentes ----------
-   GeoJSON embutido em world-land.js (window.WORLD_LAND) -> funciona
-   abrindo o arquivo direto (file://), sem servidor e sem fetch.       */
+/* ---------- carregamento dos continentes ---------- */
 async function loadLand() {
   if (window.WORLD_LAND && window.WORLD_LAND.features) return window.WORLD_LAND;
   const urls = [
@@ -839,12 +804,11 @@ async function loadLand() {
     try {
       const res = await fetch(u, { mode: 'cors' });
       if (res.ok) return await res.json();
-    } catch (e) { /* tenta o próximo */ }
+    } catch (e) {}
   }
   return null;
 }
 
-// separa as feições cujo ponto mais ao norte fica abaixo de maxLat (ex.: Antártida)
 function extractPolar(fc, maxLat) {
   if (!fc || !fc.features) return null;
   const north = (coords) => {
@@ -862,10 +826,6 @@ function extractPolar(fc, maxLat) {
 
 /* ============================================================
    ROTEAMENTO — melhor rota entre A e B aproveitando as correntes
-   Busca A* numa grade oceânica. O custo de cada trecho é o TEMPO
-   de navegação: a corrente a favor acelera, contra/cruzada freia.
-   Como a potência do motor é ~constante, menos tempo ≈ menos
-   combustível.
    ============================================================ */
 const R_EARTH = 6371;
 
@@ -874,7 +834,7 @@ function navLat(a) { return N_LAT0 - a * NRES; }
 function navIdx(a, o) { return a * NLON + o; }
 
 function buildNav() {
-  if (OD && OD.regional && ODB) {          // grade de navegação alinhada aos dados reais
+  if (OD && OD.regional && ODB) {
     NRES = OD.c.dlon;
     N_LON0 = OD.c.lon0;
     N_LAT0 = ODB.lat1;
@@ -920,7 +880,6 @@ function havKm(lo1, la1, lo2, la2) {
   return 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(s)));
 }
 
-// tempo (horas) para ir de (lo1,la1) a (lo2,la2) considerando a corrente
 function edgeHours(lo1, la1, lo2, la2) {
   const latM = (la1 + la2) / 2;
   let dLon = ((lo2 - lo1 + 540) % 360) - 180;
@@ -930,18 +889,18 @@ function edgeHours(lo1, la1, lo2, la2) {
   if (len < 1e-6) return 0;
   const ex = dx / len, ey = dy / len;
 
-  const f = sampleField(lo1 + dLon / 2, latM);            // corrente (m/s) — leste, norte
-  const S = OD ? 3.6 : 2.0;                               // m/s -> km/h  (fallback: "unidade" ~2 km/h)
+  const f = sampleField(lo1 + dLon / 2, latM);
+  const S = OD ? 3.6 : 2.0;
   const cu = f[0] * S;
   const cv = f[1] * S;
-  const cPar = cu * ex + cv * ey;                          // componente a favor/contra
+  const cPar = cu * ex + cv * ey;
   const cPerp2 = Math.max(0, cu * cu + cv * cv - cPar * cPar);
 
   const Vs = SHIP.kn * KMH_PER_KN;
-  const avail = Vs * Vs - cPerp2;                          // sobra p/ avançar após vencer a corrente cruzada
+  const avail = Vs * Vs - cPerp2;
   if (avail <= 1) return Infinity;
-  const ground = Math.sqrt(avail) + cPar;                  // velocidade efetiva sobre o fundo
-  if (ground < 0.5) return Infinity;                       // não consegue avançar contra a corrente
+  const ground = Math.sqrt(avail) + cPar;
+  if (ground < 0.5) return Infinity;
   return len / ground;
 }
 
@@ -1011,7 +970,7 @@ function aStar(aS, oS, aG, oG) {
       const ni = na * NLON + no;
       if (!NAV[ni] || closed[ni]) continue;
       if (NB8[n][0] !== 0 && NB8[n][1] !== 0) {
-        if (!NAV[ca * NLON + no] || !NAV[na * NLON + co]) continue; // não corta canto de terra
+        if (!NAV[ca * NLON + no] || !NAV[na * NLON + co]) continue;
       }
       const dt = edgeHours(clon, clat, navLon(no), navLat(na));
       if (!isFinite(dt)) continue;
@@ -1035,7 +994,6 @@ function aStar(aS, oS, aG, oG) {
   return { path, hours: g[goalI] };
 }
 
-// tempo da rota reta A->B (mesma física); null se cruzar terra
 function straightHours(A, B) {
   let dLon = ((B[0] - A[0] + 540) % 360) - 180;
   const M = 160;
@@ -1057,7 +1015,6 @@ function pathKm(p) {
   return s;
 }
 
-// suaviza a rota (Chaikin) tratando o antimeridiano
 function smoothPath(p) {
   if (p.length < 3) return p;
   const u = [p[0].slice()];
@@ -1113,7 +1070,7 @@ function computeRoute() {
   const hOpt = res.hours;
   const ref = straightHours(A, B);
   const refKm = havKm(A[0], A[1], B[0], B[1]);
-  const L_PER_H = 2200;              // consumo do motor (estimativa) em litros/hora
+  const L_PER_H = 2200;
 
   let txt = 'Rota otimizada\n  ' + fmtKm(km) + '  ·  ' + fmtDur(hOpt) + '  ·  ~' + fmtL(hOpt * L_PER_H) + '\n';
   if (ref != null) {
@@ -1220,7 +1177,7 @@ function drawRoute() {
 
 /* ---------- legenda ---------- */
 function buildLegend() {
-  const idxByKey = { cold: 2, mild: 1, warm: 0 };   // posição em TEMPCOL
+  const idxByKey = { cold: 2, mild: 1, warm: 0 };
   document.querySelectorAll('#lg-currents .lg-swatches span').forEach((el) => {
     const i = idxByKey[el.dataset.c];
     if (i != null) el.style.background = 'rgb(' + TEMPCOL[i] + ')';
@@ -1238,7 +1195,7 @@ function buildLegend() {
 function updateLegend() {
   const sw = document.querySelector('#lg-currents .lg-swatches');
   const sst = document.getElementById('lg-sst');
-  if (sw) sw.hidden = showSST;          // no modo calor as correntes são linhas escuras
+  if (sw) sw.hidden = showSST;
   if (sst) sst.hidden = !showSST;
 }
 
@@ -1295,7 +1252,6 @@ function bindUpdateButton() {
     }
   });
 
-  // se recarregou no meio de uma atualização, retoma o acompanhamento
   fetch('/api/status', { cache: 'no-store' })
     .then((r) => r.json())
     .then((j) => { if (j.state === 'running') { btn.disabled = true; poll(); } })
@@ -1304,7 +1260,6 @@ function bindUpdateButton() {
 
 /* ---------- controles ---------- */
 function bindControls() {
-  // estado inicial = o que estiver marcado no HTML
   showSST = document.getElementById('t-sst').checked;
   showCurr = document.getElementById('t-curr').checked;
   showGrat = document.getElementById('t-grat').checked;
@@ -1464,7 +1419,7 @@ async function init() {
   bindControls();
 
   MD = window.MARINE_DATA || null;
-  OD = decodeMarine(curDay) || decodeOceanData();   // dados regionais (xlsx) têm prioridade
+  OD = decodeMarine(curDay) || decodeOceanData();
   if (OD) {
     const regional = OD.regional;
     CFG.speed = regional ? 0.30 : 0.22;
@@ -1485,14 +1440,14 @@ async function init() {
   readoutEl.textContent = 'preparando o mapa…';
   land = await loadLand();
   if (!land) warnEl.hidden = false;
-  iceCaps = extractPolar(land, -60);   // Antártida -> desenhada como gelo
+  iceCaps = extractPolar(land, -60);
 
-  await new Promise((r) => setTimeout(r, 16)); // deixa a mensagem aparecer
+  await new Promise((r) => setTimeout(r, 16));
 
   prepCurrents();
   buildLandMask();
   buildNav();
-  if (!OD) buildField();          // campo analítico só quando não há dados reais
+  if (!OD) buildField();
   buildTempGrid();
   buildSST();
   buildLegend();
