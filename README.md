@@ -2,9 +2,15 @@
 
 Sistema de planejamento de rotas marítimas de custo mínimo baseado no algoritmo A*, utilizando dados reais de correntes oceânicas do **Copernicus Marine Service**.
 
+<<<<<<< HEAD
 > Trabalho prático da disciplina de **Inteligência Artificial I**  
 > FHO – Fundação Hermínio Ometto | Engenharia da Computação | 2026  
 > **Autores:** Moisés H. C. da Silva (RA 114518) · Felipe Apolinário de Souza (RA 114771) · Gabriel V. Krebski (RA 115442)
+=======
+> Trabalho prático 
+> FHO – Fundação Hermínio Ometto | Engenharia da Computação | 2026  
+> **Alunos:** Moisés H. C. da Silva (RA 114518) · Felipe Apolinário de Souza (RA 114771) · Gabriel V. Krebski (RA 115442)
+>>>>>>> ef85ffc4c58ee8eb4ef200b04ffbc0ec51d164a5
 
 ---
 
@@ -33,11 +39,15 @@ projeto_oceano_ia/
 ├── servidor.bat                ← atalho Windows para iniciar o servidor
 ├── atualizar_correntes_GLOBAL.bat  ← atualiza correntes globais (NOAA)
 ├── usar_dados_REGIONAL.bat     ← usa dados regionais baixados
+<<<<<<< HEAD
 └── web/                        ← versão alternativa com pipeline Monte Carlo
     ├── index.html
     ├── dados.js
     ├── rota.geojson
     └── world-land.js
+=======
+
+>>>>>>> ef85ffc4c58ee8eb4ef200b04ffbc0ec51d164a5
 ```
 
 ---
