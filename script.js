@@ -18,8 +18,15 @@ let routeInfoEl = null;
 /* ---------- configuração ---------- */
 const CFG = { fade: 0.042, speed: 0.16, stepCap: 0.9, density: 360, minP: 1400, maxP: 8800 };
 
+/* ---------- níveis de densidade de partículas (para celulares mais fracos) ---------- */
+const DENSITY_LEVELS = {
+  alta:  { density: 360,  minP: 1400, maxP: 8800 },
+  media: { density: 650,  minP: 700,  maxP: 4200 },
+  baixa: { density: 1200, minP: 300,  maxP: 1600 },
+};
+
 /* ---------- paleta cartográfica (tons suaves, estilo atlas) ---------- */
-const MAP = {
+const MAP_LIGHT = {
   ocean:    '#d4e6ee',
   land:     '#bdd2a4',
   landLine: 'rgba(96,120,78,0.55)',
@@ -29,7 +36,33 @@ const MAP = {
   route:    '#123f7d',
   ice:      '#f5f7f7',
   iceLine:  'rgba(150,170,182,0.6)',
+  border:   'rgba(70,90,72,0.55)',
+  label:    '#2c3b30',
+  labelHalo: 'rgba(255,255,255,0.85)',
+  navRoute: 'rgba(122,86,42,0.55)',
+  navLabel: '#5b3d1a',
+  oceanLabel: 'rgba(47,90,130,0.55)',
+  oceanLabelHalo: 'rgba(255,255,255,0.75)',
 };
+const MAP_DARK = {
+  ocean:    '#0c2536',
+  land:     '#2e3b28',
+  landLine: 'rgba(150,175,130,0.35)',
+  landShadow: 'rgba(0,0,0,0.55)',
+  grat:     'rgba(150,185,210,0.09)',
+  flow:     '20,66,116',
+  route:    '#6fa8e8',
+  ice:      '#3a4650',
+  iceLine:  'rgba(180,195,205,0.4)',
+  border:   'rgba(150,175,150,0.4)',
+  label:    '#dfe8ea',
+  labelHalo: 'rgba(10,20,28,0.75)',
+  navRoute: 'rgba(214,158,92,0.6)',
+  navLabel: '#e3b57e',
+  oceanLabel: 'rgba(150,190,220,0.55)',
+  oceanLabelHalo: 'rgba(10,20,28,0.7)',
+};
+const MAP = Object.assign({}, MAP_LIGHT);
 const TW = 512, TH = 256;
 const MW = 1024, MH = 512;
 const FW = 360, FH = 180;
@@ -40,15 +73,23 @@ let proj = null, geoPath = null;
 let scaleK = 0, originX = 0, originY = 0, baseK = 1, Z = 1;
 let land = null;
 let landData = null;
+let countries = null;
+let majorCountries = []; // lista fixa dos países exibidos — calculada uma única vez
 let iceCaps = null;
+let panning = false;
+let labelRects = [];
 const tempGrid = new Float32Array(TW * TH);
 const FIELD = new Float32Array(FW * FH * 2);
 const SPD = new Float32Array(FW * FH);
 const sstCanvas = document.createElement('canvas');
 const sctx = sstCanvas.getContext('2d');
 let sstReady = false;
+const BW = 2048, BH = 1024;
+const bordersCanvas = document.createElement('canvas');
+const brctx = bordersCanvas.getContext('2d');
+let bordersReady = false;
 let particles = [];
-let showSST = false, showCurr = true, showGrat = true;
+let showSST = false, showCurr = true, showGrat = true, showNavRoutes = true;
 let phase = 0, lastT = performance.now(), rafId = 0;
 let graticule = d3.geoGraticule10();
 
@@ -195,6 +236,34 @@ const CURRENTS = [
     pts: [[-200,-56],[-175,-57],[-150,-58],[-125,-56],[-100,-55],[-75,-57],[-50,-58],
           [-25,-57],[0,-56],[25,-55],[50,-56],[75,-58],[100,-57],[125,-56],[150,-55],
           [175,-56],[200,-57]] },
+];
+
+/* ---------- rotas de navegação (comerciais e estratégicas) ----------
+   os pontos abaixo são só os portos/passagens-chave; o traçado real entre
+   eles é calculado pelo mesmo A* náutico usado em "Traçar rota", então a
+   linha sempre segue por água. */
+const NAV_ROUTES = [
+  { name: 'Transpacífico (Ásia–EUA)', via: [[121.8,31.2],[175,48],[-118.2,33.7]] },
+  { name: 'Transatlântico Norte', via: [[4.5,51.9],[-30,45],[-74.0,40.6]] },
+  { name: 'Ásia–Europa (Canal de Suez)',
+    via: [[103.8,1.3],[80,6],[43.3,12.6],[32.4,30.6],[4.5,51.9]] },
+  { name: 'Ásia–Europa (Cabo da Boa Esperança)',
+    via: [[103.8,1.3],[57,-22],[18.4,-34.4],[4.5,51.9]] },
+  { name: 'Canal do Panamá',
+    via: [[-118.2,33.7],[-84.9,9.1],[-79.7,9.1],[-74.0,40.6]] },
+  { name: 'Estreito de Malaca', via: [[72.8,18.9],[80,6],[100.3,5.4],[121.8,31.2]] },
+  { name: 'Rota do Ártico (Passagem do Nordeste)',
+    via: [[33.1,69.0],[90,76],[170,69],[-168.9,65.8]] },
+];
+
+/* ---------- nomes dos oceanos ---------- */
+const OCEAN_LABELS = [
+  { name: 'Oceano Atlântico', lon: -30, lat: 10 },
+  { name: 'Oceano Pacífico', lon: -150, lat: -25 },
+  { name: 'Oceano Pacífico', lon: 172, lat: -20 },
+  { name: 'Oceano Índico', lon: 75, lat: -18 },
+  { name: 'Oceano Ártico', lon: 0, lat: 84 },
+  { name: 'Oceano Antártico', lon: 0, lat: -65 },
 ];
 
 /* ---------- circulação de fundo: giros das bacias ---------- */
@@ -757,6 +826,188 @@ function drawBase() {
     bctx.lineWidth = 0.7;
     bctx.stroke();
   }
+
+  drawCountryBorders();
+
+  if (!panning) {
+    labelRects = [];
+    drawCountryLabels();
+    if (showNavRoutes) drawNavRoutes();
+    drawOceanLabels();
+  }
+}
+
+/* ---------- fronteiras dos países ----------
+   desenhadas UMA vez numa textura fixa (buildBordersTexture); a cada frame
+   é só um drawImage esticado pro zoom/pan atual — sem retraçar geometria. */
+function bboxVisible(b, vb) {
+  if (!b) return true;
+  const lon0 = b[0][0], lat0 = b[0][1], lon1 = b[1][0], lat1 = b[1][1];
+  if (lon1 - lon0 > 180) return true; // provavelmente cruza o antimeridiano
+  return lon1 >= vb.lon0 && lon0 <= vb.lon1 && lat1 >= vb.lat0 && lat0 <= vb.lat1;
+}
+
+function buildBordersTexture() {
+  if (!countries) return;
+  bordersCanvas.width = BW;
+  bordersCanvas.height = BH;
+  const proj2 = d3.geoEquirectangular().translate([BW / 2, BH / 2]).scale(BW / (2 * Math.PI));
+  const path2 = d3.geoPath(proj2, brctx);
+  brctx.clearRect(0, 0, BW, BH);
+  brctx.beginPath();
+  path2(countries);
+  brctx.setLineDash([6, 4]);
+  brctx.strokeStyle = MAP.border;
+  brctx.lineWidth = 1.6;
+  brctx.stroke();
+  bordersReady = true;
+}
+
+function drawCountryBorders() {
+  if (!bordersReady) return;
+  bctx.imageSmoothingEnabled = true;
+  bctx.imageSmoothingQuality = 'high';
+  bctx.drawImage(bordersCanvas, 0, 0, BW, BH, originX, originY, 360 * scaleK, 180 * scaleK);
+}
+
+const MAX_LABEL_RANK = 2; // só os países principais — lista travada, não recalcula ao dar zoom
+const LABEL_FONT_SIZE = 12;
+
+function drawCountryLabels() {
+  if (!majorCountries.length) return;
+  const vb = viewBounds();
+
+  bctx.textAlign = 'center';
+  bctx.textBaseline = 'middle';
+  bctx.lineJoin = 'round';
+  bctx.font = '600 ' + LABEL_FONT_SIZE + 'px "Inter","Segoe UI",sans-serif';
+
+  const pad = 3;
+  for (let i = 0; i < majorCountries.length; i++) {
+    const f = majorCountries[i];
+    if (!bboxVisible(f.__b, vb)) continue;
+    const p = f.properties;
+    const s = project(p.x, p.y);
+    if (s[0] < -20 || s[0] > W + 20 || s[1] < -10 || s[1] > H + 10) continue;
+
+    const tw = bctx.measureText(p.n).width;
+    const bx0 = s[0] - tw / 2 - pad, bx1 = s[0] + tw / 2 + pad;
+    const by0 = s[1] - LABEL_FONT_SIZE / 2 - pad, by1 = s[1] + LABEL_FONT_SIZE / 2 + pad;
+
+    let overlap = false;
+    for (let k = 0; k < labelRects.length; k++) {
+      const b = labelRects[k];
+      if (bx0 < b[2] && bx1 > b[0] && by0 < b[3] && by1 > b[1]) { overlap = true; break; }
+    }
+    if (overlap) continue;
+    labelRects.push([bx0, by0, bx1, by1]);
+
+    bctx.lineWidth = 3;
+    bctx.strokeStyle = MAP.labelHalo;
+    bctx.strokeText(p.n, s[0], s[1]);
+    bctx.fillStyle = MAP.label;
+    bctx.fillText(p.n, s[0], s[1]);
+  }
+}
+
+/* ---------- rotas de navegação (comerciais e estratégicas) ---------- */
+function drawNavRoutes() {
+  const vb = viewBounds();
+  bctx.setLineDash([6, 4]);
+  bctx.strokeStyle = MAP.navRoute;
+  bctx.lineWidth = 1;
+  bctx.lineCap = 'round';
+  bctx.lineJoin = 'round';
+
+  const visible = [];
+  for (let i = 0; i < NAV_ROUTES.length; i++) {
+    const r = NAV_ROUTES[i];
+    if (!r.pts || !bboxVisible(r.__b, vb)) continue;
+    visible.push(r);
+    bctx.beginPath();
+    let prev = null;
+    for (let k = 0; k < r.pts.length; k++) {
+      const s = project(r.pts[k][0], r.pts[k][1]);
+      if (k === 0 || (prev && Math.abs(s[0] - prev[0]) > W * 0.5)) bctx.moveTo(s[0], s[1]);
+      else bctx.lineTo(s[0], s[1]);
+      prev = s;
+    }
+    bctx.stroke();
+  }
+  bctx.setLineDash([]);
+
+  bctx.fillStyle = MAP.navRoute;
+  for (let i = 0; i < visible.length; i++) {
+    const r = visible[i];
+    const ends = [r.pts[0], r.pts[r.pts.length - 1]];
+    for (let e = 0; e < ends.length; e++) {
+      const s = project(ends[e][0], ends[e][1]);
+      if (s[0] < -6 || s[0] > W + 6 || s[1] < -6 || s[1] > H + 6) continue;
+      bctx.beginPath();
+      bctx.arc(s[0], s[1], 2.2, 0, Math.PI * 2);
+      bctx.fill();
+      bctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      bctx.lineWidth = 1;
+      bctx.stroke();
+    }
+  }
+
+  bctx.textAlign = 'center';
+  bctx.textBaseline = 'middle';
+  bctx.font = 'italic 600 10px "Inter","Segoe UI",sans-serif';
+  const pad = 3;
+  for (let i = 0; i < visible.length; i++) {
+    const r = visible[i];
+    const s = project(r.label[0], r.label[1]);
+    if (s[0] < -20 || s[0] > W + 20 || s[1] < -10 || s[1] > H + 10) continue;
+
+    const tw = bctx.measureText(r.name).width;
+    const bx0 = s[0] - tw / 2 - pad, bx1 = s[0] + tw / 2 + pad;
+    const by0 = s[1] - 8, by1 = s[1] + 8;
+    let overlap = false;
+    for (let k = 0; k < labelRects.length; k++) {
+      const b = labelRects[k];
+      if (bx0 < b[2] && bx1 > b[0] && by0 < b[3] && by1 > b[1]) { overlap = true; break; }
+    }
+    if (overlap) continue;
+    labelRects.push([bx0, by0, bx1, by1]);
+
+    bctx.lineWidth = 3;
+    bctx.strokeStyle = MAP.labelHalo;
+    bctx.strokeText(r.name, s[0], s[1]);
+    bctx.fillStyle = MAP.navLabel;
+    bctx.fillText(r.name, s[0], s[1]);
+  }
+}
+
+/* ---------- nomes dos oceanos ---------- */
+function drawOceanLabels() {
+  bctx.textAlign = 'center';
+  bctx.textBaseline = 'middle';
+  bctx.font = 'italic 700 15px "Inter","Segoe UI",sans-serif';
+  const pad = 4;
+  for (let i = 0; i < OCEAN_LABELS.length; i++) {
+    const o = OCEAN_LABELS[i];
+    const s = project(o.lon, o.lat);
+    if (s[0] < -40 || s[0] > W + 40 || s[1] < -20 || s[1] > H + 20) continue;
+
+    const tw = bctx.measureText(o.name).width;
+    const bx0 = s[0] - tw / 2 - pad, bx1 = s[0] + tw / 2 + pad;
+    const by0 = s[1] - 10, by1 = s[1] + 10;
+    let overlap = false;
+    for (let k = 0; k < labelRects.length; k++) {
+      const b = labelRects[k];
+      if (bx0 < b[2] && bx1 > b[0] && by0 < b[3] && by1 > b[1]) { overlap = true; break; }
+    }
+    if (overlap) continue;
+    labelRects.push([bx0, by0, bx1, by1]);
+
+    bctx.lineWidth = 3;
+    bctx.strokeStyle = MAP.oceanLabelHalo;
+    bctx.strokeText(o.name, s[0], s[1]);
+    bctx.fillStyle = MAP.oceanLabel;
+    bctx.fillText(o.name, s[0], s[1]);
+  }
 }
 
 /* ---------- dimensionamento ---------- */
@@ -804,6 +1055,30 @@ async function loadLand() {
     try {
       const res = await fetch(u, { mode: 'cors' });
       if (res.ok) return await res.json();
+    } catch (e) {}
+  }
+  return null;
+}
+
+async function loadCountries() {
+  if (window.WORLD_COUNTRIES && window.WORLD_COUNTRIES.features) return window.WORLD_COUNTRIES;
+  const urls = [
+    'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson',
+    'https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@master/geojson/ne_110m_admin_0_countries.geojson',
+  ];
+  for (const u of urls) {
+    try {
+      const res = await fetch(u, { mode: 'cors' });
+      if (!res.ok) continue;
+      const raw = await res.json();
+      raw.features.forEach((f) => {
+        const p = f.properties;
+        f.properties = {
+          n: p.NAME || p.ADMIN || p.SOVEREIGNT || '',
+          x: p.LABEL_X, y: p.LABEL_Y, r: p.LABELRANK || 6,
+        };
+      });
+      return raw;
     } catch (e) {}
   }
   return null;
@@ -1038,6 +1313,55 @@ function smoothPath(p) {
   return cur.map((pt) => [((pt[0] + 180) % 360 + 360) % 360 - 180, pt[1]]);
 }
 
+/* ---------- abre uma passagem artificial na grade náutica (canais) ---------- */
+function openCorridor(lon, lat0, lat1, halfWidthDeg) {
+  if (!NAV) return;
+  const o = Math.round((lon - N_LON0) / NRES);
+  const aFrom = Math.round((N_LAT0 - lat0) / NRES);
+  const aTo = Math.round((N_LAT0 - lat1) / NRES);
+  const aMin = Math.min(aFrom, aTo), aMax = Math.max(aFrom, aTo);
+  const w = Math.max(1, Math.round(halfWidthDeg / NRES));
+  for (let a = aMin; a <= aMax; a++) {
+    if (a < 0 || a >= NLAT) continue;
+    for (let oo = o - w; oo <= o + w; oo++) {
+      if (oo < 0 || oo >= NLON) continue;
+      NAV[navIdx(a, oo)] = 1;
+    }
+  }
+}
+
+/* ---------- calcula as rotas de navegação pelo mesmo A* náutico da rota manual ---------- */
+function computeNavRoutes() {
+  if (!NAV || (OD && OD.regional)) return;
+  openCorridor(32.4, 29.9, 31.3, 1); // Canal de Suez
+  openCorridor(-79.7, 8.9, 9.4, 1);  // Canal do Panamá
+
+  for (const r of NAV_ROUTES) {
+    const full = [];
+    let ok = true;
+    for (let i = 0; i < r.via.length - 1 && ok; i++) {
+      const a = r.via[i], b = r.via[i + 1];
+      const sA = navSnap(a[0], a[1]), sB = navSnap(b[0], b[1]);
+      if (!sA || !sB) { ok = false; break; }
+      const res = aStar(sA[0], sA[1], sB[0], sB[1]);
+      if (!res || res.path.length < 2) { ok = false; break; }
+      const seg = smoothPath(res.path);
+      if (full.length) full.push.apply(full, seg.slice(1));
+      else full.push.apply(full, seg);
+    }
+    if (!ok || full.length < 2) { r.pts = null; continue; }
+
+    let lon0 = Infinity, lon1 = -Infinity, lat0 = Infinity, lat1 = -Infinity;
+    for (const [lo, la] of full) {
+      if (lo < lon0) lon0 = lo; if (lo > lon1) lon1 = lo;
+      if (la < lat0) lat0 = la; if (la > lat1) lat1 = la;
+    }
+    r.pts = full;
+    r.__b = [[lon0, lat0], [lon1, lat1]];
+    r.label = full[(full.length / 2) | 0];
+  }
+}
+
 function fmtKm(k) { return k >= 1000 ? (k / 1000).toFixed(2) + ' mil km' : k.toFixed(0) + ' km'; }
 function fmtDur(h) {
   if (!isFinite(h)) return '—';
@@ -1195,8 +1519,10 @@ function buildLegend() {
 function updateLegend() {
   const sw = document.querySelector('#lg-currents .lg-swatches');
   const sst = document.getElementById('lg-sst');
+  const nav = document.getElementById('lg-nav');
   if (sw) sw.hidden = showSST;
   if (sst) sst.hidden = !showSST;
+  if (nav) nav.hidden = !showNavRoutes;
 }
 
 /* ---------- botão "Atualizar correntes" (precisa do servidor local) ---------- */
@@ -1258,17 +1584,85 @@ function bindUpdateButton() {
     .catch(() => {});
 }
 
+/* ---------- tema claro/escuro ---------- */
+function isDarkActive() {
+  const t = document.documentElement.getAttribute('data-theme');
+  if (t === 'dark') return true;
+  if (t === 'light') return false;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+function updateThemeColorMeta() {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', isDarkActive() ? '#0f1620' : '#eef2f4');
+}
+
+function applyMapTheme() {
+  Object.assign(MAP, isDarkActive() ? MAP_DARK : MAP_LIGHT);
+  updateThemeColorMeta();
+  buildBordersTexture();
+  drawBase();
+  drawRoute();
+}
+
+function bindThemeToggle() {
+  const btn = document.getElementById('theme-toggle');
+  if (!btn) return;
+
+  let stored = null;
+  try { stored = localStorage.getItem('theme'); } catch (e) {}
+  if (stored === 'light' || stored === 'dark') {
+    document.documentElement.setAttribute('data-theme', stored);
+  }
+  applyMapTheme();
+
+  btn.addEventListener('click', () => {
+    const next = isDarkActive() ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('theme', next); } catch (e) {}
+    applyMapTheme();
+  });
+
+  const mqDark = window.matchMedia('(prefers-color-scheme: dark)');
+  mqDark.addEventListener('change', () => {
+    if (!document.documentElement.getAttribute('data-theme')) applyMapTheme();
+  });
+}
+
+/* ---------- painel recolhível (celular/tablet) ---------- */
+function bindPanelToggle() {
+  const panel = document.getElementById('panel');
+  const btn = document.getElementById('panel-toggle');
+  if (!panel || !btn) return;
+  const mq = window.matchMedia('(max-width: 640px)');
+
+  const setCollapsed = (collapsed) => {
+    panel.classList.toggle('collapsed', collapsed);
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    btn.textContent = collapsed ? '+' : '−';
+  };
+
+  btn.addEventListener('click', () => setCollapsed(!panel.classList.contains('collapsed')));
+  setCollapsed(mq.matches);
+  mq.addEventListener('change', (e) => setCollapsed(e.matches));
+}
+
 /* ---------- controles ---------- */
 function bindControls() {
   showSST = document.getElementById('t-sst').checked;
   showCurr = document.getElementById('t-curr').checked;
   showGrat = document.getElementById('t-grat').checked;
+  showNavRoutes = document.getElementById('t-navroutes').checked;
 
   document.getElementById('t-sst').addEventListener('change', (e) => { showSST = e.target.checked; updateLegend(); drawBase(); drawRoute(); });
   document.getElementById('t-grat').addEventListener('change', (e) => { showGrat = e.target.checked; drawBase(); });
   document.getElementById('t-curr').addEventListener('change', (e) => { showCurr = e.target.checked; });
-  document.getElementById('t-speed').addEventListener('input', (e) => { CFG.speed = (+e.target.value) / 100; });
-  document.getElementById('t-reseed').addEventListener('click', seedParticles);
+  document.getElementById('t-density').addEventListener('change', (e) => {
+    const lvl = DENSITY_LEVELS[e.target.value] || DENSITY_LEVELS.alta;
+    CFG.density = lvl.density; CFG.minP = lvl.minP; CFG.maxP = lvl.maxP;
+    seedParticles();
+  });
+  document.getElementById('t-navroutes').addEventListener('change', (e) => { showNavRoutes = e.target.checked; updateLegend(); drawBase(); });
   document.getElementById('z-in').addEventListener('click', () => setZoom(Z * 1.5, W / 2, H / 2));
   document.getElementById('z-out').addEventListener('click', () => setZoom(Z / 1.5, W / 2, H / 2));
   document.getElementById('z-reset').addEventListener('click', resetView);
@@ -1293,11 +1687,16 @@ function bindControls() {
   });
 
   bindUpdateButton();
+  bindPanelToggle();
+  bindThemeToggle();
 
-  let drag = null, touch = null;
+  let drag = null, touch = null, wheelEnd = null;
 
   flowCanvas.addEventListener('wheel', (e) => {
     e.preventDefault();
+    panning = true;
+    clearTimeout(wheelEnd);
+    wheelEnd = setTimeout(() => { panning = false; requestBase(); }, 150);
     const r = flowCanvas.getBoundingClientRect();
     setZoom(Z * Math.exp(-e.deltaY * 0.0016), e.clientX - r.left, e.clientY - r.top);
   }, { passive: false });
@@ -1310,6 +1709,7 @@ function bindControls() {
 
   flowCanvas.addEventListener('mousedown', (e) => {
     drag = { x: e.clientX, y: e.clientY, moved: 0 };
+    panning = true;
     flowCanvas.classList.add('grabbing');
   });
   window.addEventListener('mousemove', (e) => {
@@ -1330,9 +1730,12 @@ function bindControls() {
     }
     drag = null;
     flowCanvas.classList.remove('grabbing');
+    if (panning) { panning = false; requestBase(); }
   });
 
   flowCanvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    panning = true;
     if (e.touches.length === 1) {
       touch = { mode: 'pan', x: e.touches[0].clientX, y: e.touches[0].clientY, moved: 0 };
     } else if (e.touches.length === 2) {
@@ -1366,12 +1769,17 @@ function bindControls() {
     }
   }, { passive: false });
   flowCanvas.addEventListener('touchend', (e) => {
+    e.preventDefault();
     if (touch && touch.mode === 'pan' && touch.moved < 8 && !e.touches.length) {
       const r = flowCanvas.getBoundingClientRect();
       handleMapClick(touch.x - r.left, touch.y - r.top);
     }
-    if (!e.touches.length) touch = null;
-  });
+    if (!e.touches.length) {
+      touch = null;
+      panning = false;
+      requestBase();
+    }
+  }, { passive: false });
 
   flowCanvas.addEventListener('mousemove', (ev) => {
     if (drag || touch) return;
@@ -1410,7 +1818,9 @@ function bindControls() {
   });
 
   let rt;
-  window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(resize, 180); });
+  const onResize = () => { clearTimeout(rt); rt = setTimeout(resize, 180); };
+  window.addEventListener('resize', onResize);
+  window.addEventListener('orientationchange', onResize);
 }
 
 /* ---------- inicialização ---------- */
@@ -1423,8 +1833,6 @@ async function init() {
   if (OD) {
     const regional = OD.regional;
     CFG.speed = regional ? 0.30 : 0.22;
-    const sl = document.getElementById('t-speed');
-    if (sl) sl.value = regional ? 30 : 22;
     const bs = document.querySelector('#brand span');
     if (bs) bs.textContent = regional
       ? 'dados reais · Copernicus Marine · correntes de superfície (SST: modelo)'
@@ -1438,9 +1846,16 @@ async function init() {
   }
 
   readoutEl.textContent = 'preparando o mapa…';
-  land = await loadLand();
+  [land, countries] = await Promise.all([loadLand(), loadCountries()]);
   if (!land) warnEl.hidden = false;
   iceCaps = extractPolar(land, -60);
+  if (countries) {
+    countries.features.forEach((f) => { f.__b = d3.geoBounds(f); });
+    majorCountries = countries.features
+      .filter((f) => f.properties.r <= MAX_LABEL_RANK)
+      .sort((a, b) => a.properties.r - b.properties.r);
+    buildBordersTexture();
+  }
 
   await new Promise((r) => setTimeout(r, 16));
 
@@ -1448,6 +1863,7 @@ async function init() {
   buildLandMask();
   buildNav();
   if (!OD) buildField();
+  computeNavRoutes();
   buildTempGrid();
   buildSST();
   buildLegend();

@@ -33,6 +33,7 @@ projeto_oceano_ia/
 ├── style.css                   ← estilo da interface
 ├── ocean-data.js               ← dados de correntes (gerado pelo fetch_ocean.py)
 ├── world-land.js               ← máscara de terra (GeoJSON compactado)
+├── world-countries.js          ← fronteiras e nomes dos países (GeoJSON compactado)
 ├── fetch_ocean.py              ← baixa dados do Copernicus e gera ocean-data.js
 ├── converter_dados.py          ← converte NetCDF para o formato do mapa
 ├── servidor.py                 ← servidor local com botão de atualização
