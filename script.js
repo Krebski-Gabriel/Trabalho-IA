@@ -13,6 +13,7 @@ const fctx = flowCanvas.getContext('2d');
 const rctx = routeCanvas.getContext('2d');
 const warnEl = document.getElementById('warn');
 const readoutEl = document.getElementById('readout');
+const portTooltipEl = document.getElementById('port-tooltip');
 let routeInfoEl = null;
 
 /* ---------- configuração ---------- */
@@ -25,42 +26,52 @@ const DENSITY_LEVELS = {
   baixa: { density: 1200, minP: 300,  maxP: 1600 },
 };
 
-/* ---------- paleta cartográfica (tons suaves, estilo atlas) ---------- */
+/* ---------- paleta cartográfica (estilo satélite / Blue Marble) ----------
+   oceano e continentes vêm das texturas de buildSatelliteTextures(); estas cores
+   são o fallback (antes das texturas ficarem prontas) e os elementos por cima. */
 const MAP_LIGHT = {
-  ocean:    '#d4e6ee',
-  land:     '#bdd2a4',
-  landLine: 'rgba(96,120,78,0.55)',
-  landShadow: 'rgba(38,58,46,0.32)',
-  grat:     'rgba(66,92,108,0.11)',
-  flow:     '20,66,116',
-  route:    '#123f7d',
-  ice:      '#f5f7f7',
-  iceLine:  'rgba(150,170,182,0.6)',
-  border:   'rgba(70,90,72,0.55)',
-  label:    '#2c3b30',
-  labelHalo: 'rgba(255,255,255,0.85)',
-  navRoute: 'rgba(122,86,42,0.55)',
-  navLabel: '#5b3d1a',
-  oceanLabel: 'rgba(47,90,130,0.55)',
-  oceanLabelHalo: 'rgba(255,255,255,0.75)',
+  ocean:    '#0b2a4f',
+  land:     '#4d6b35',
+  landLine: 'rgba(255,255,255,0.14)',
+  landDim:  null,
+  oceanDim: null,
+  grat:     'rgba(205,228,245,0.17)',
+  route:    '#35a7ff',
+  ice:      '#e8ecef',
+  iceShade: '#d0dfe5',
+  iceLine:  'rgba(255,255,255,0.5)',
+  border:   'rgba(255,246,215,0.5)',
+  label:    '#fbf8ef',
+  labelHalo: 'rgba(12,22,16,0.62)',
+  navRoute: 'rgba(255,208,140,0.6)',
+  navLabel: '#ffd9a3',
+  oceanLabel: 'rgba(196,224,246,0.72)',
+  oceanLabelHalo: 'rgba(4,16,36,0.55)',
+  port: '#e8b23a',
+  portRing: '#7a4f10',
+  portGlow: 'rgba(232,178,58,0.65)',
 };
 const MAP_DARK = {
-  ocean:    '#0c2536',
-  land:     '#2e3b28',
-  landLine: 'rgba(150,175,130,0.35)',
-  landShadow: 'rgba(0,0,0,0.55)',
-  grat:     'rgba(150,185,210,0.09)',
-  flow:     '20,66,116',
-  route:    '#6fa8e8',
-  ice:      '#3a4650',
-  iceLine:  'rgba(180,195,205,0.4)',
-  border:   'rgba(150,175,150,0.4)',
-  label:    '#dfe8ea',
-  labelHalo: 'rgba(10,20,28,0.75)',
-  navRoute: 'rgba(214,158,92,0.6)',
-  navLabel: '#e3b57e',
-  oceanLabel: 'rgba(150,190,220,0.55)',
-  oceanLabelHalo: 'rgba(10,20,28,0.7)',
+  ocean:    '#061a33',
+  land:     '#34482a',
+  landLine: 'rgba(255,255,255,0.1)',
+  landDim:  'rgba(0,0,0,0.24)',
+  oceanDim: 'rgba(0,6,18,0.3)',
+  grat:     'rgba(180,210,235,0.13)',
+  route:    '#6fb8ff',
+  ice:      '#cdd6dc',
+  iceShade: '#b2c0c9',
+  iceLine:  'rgba(255,255,255,0.35)',
+  border:   'rgba(230,225,200,0.4)',
+  label:    '#e9eee8',
+  labelHalo: 'rgba(0,0,0,0.7)',
+  navRoute: 'rgba(240,190,120,0.55)',
+  navLabel: '#e8c08a',
+  oceanLabel: 'rgba(160,195,225,0.6)',
+  oceanLabelHalo: 'rgba(0,8,20,0.6)',
+  port: '#ffd166',
+  portRing: '#4a3005',
+  portGlow: 'rgba(255,209,102,0.75)',
 };
 const MAP = Object.assign({}, MAP_LIGHT);
 const TW = 512, TH = 256;
@@ -75,7 +86,11 @@ let land = null;
 let landData = null;
 let countries = null;
 let majorCountries = []; // lista fixa dos países exibidos — calculada uma única vez
-let iceCaps = null;
+/* gelo/neve polar: territórios específicos (por nome) + faixas de latitude */
+const POLAR_TERRITORY_NAMES = new Set(['Greenland', 'Antarctica']);
+const POLAR_HARD_LAT = 65; // a partir daqui é 100% gelo
+const POLAR_SOFT_LAT = 55; // abaixo daqui é 100% cor normal de terra — entre os dois, degradê
+let polarTerritories = null;
 let panning = false;
 let labelRects = [];
 const tempGrid = new Float32Array(TW * TH);
@@ -89,16 +104,40 @@ const bordersCanvas = document.createElement('canvas');
 const brctx = bordersCanvas.getContext('2d');
 let bordersReady = false;
 let particles = [];
-let showSST = false, showCurr = true, showGrat = true, showNavRoutes = true;
+let showSST = false, showCurr = true, showGrat = true, showNavRoutes = true, showPorts = false;
+const PORTS = (window.GLOBAL_PORTS_DATA || []);
+const PORT_BY_ID = new Map(PORTS.map((p) => [p.id, p]));
+/* LOD (Level of Detail): quanto maior minZ, mais perto é preciso dar zoom
+   pra o porto aparecer — Z=1 é o mundo inteiro na tela. */
+const PORT_SIZE_META = {
+  'Grande Hub':           { minZ: 0,   r: 5.5, glow: 12 },
+  'Porto Regional':       { minZ: 2.2, r: 4,   glow: 8  },
+  'Ancoradouro/Terminal': { minZ: 5,   r: 2.8, glow: 5  },
+};
+function portMeta(p) { return PORT_SIZE_META[p.size] || PORT_SIZE_META['Ancoradouro/Terminal']; }
+let portScreenPos = []; // recalculado a cada drawPorts(): [{x,y,port}]
+let hoveredPort = null;
 let phase = 0, lastT = performance.now(), rafId = 0;
 let graticule = d3.geoGraticule10();
 
 /* ---------- estado da rota ---------- */
 const SHIP = { kn: 18 };
 let routeA = null, routeB = null;
+let routeAPort = null, routeBPort = null;
 let routePath = null;
 let routeMode = null;
+let routeIsEmergency = false;
+let emergencyMode = false;
 let lastRouteClick = 0;
+
+/* ---------- Copiloto IA: 3 motores de rota (Padrão / A* Python / LLM) ---------- */
+let routeVariants = null;     // {key, baseline:{path,km,hours,...}, astar:{...}, llm:{...,rationale}}
+let routeDisplayMode = 'astar'; // 'astar' | 'llm' | 'both' -- controla o que aparece no mapa
+let pulsePhase = 0;
+let lastHoverLL = null;       // [lon,lat] sob o cursor — "ponto atual" das Previsões IA
+let oilSpill = null;          // {origin, volume_ton, frames:[{hour,lat,lon,radius_km}], title, explanation, drift_*}
+let fishHotspots = null;      // {origin, raio_km, hotspots:[{lat,lon,score,title,explanation,...}]}
+
 let NAV = null;
 let NRES = 1;
 let NLON = Math.round(360 / NRES);
@@ -455,6 +494,300 @@ function buildLandMask() {
   landData = m.getImageData(0, 0, MW, MH).data;
 }
 
+/* ---------- texturas estilo satélite (Natural Earth / Blue Marble) ----------
+   geradas UMA vez, equiretangulares cobrindo o globo inteiro; a cada redesenho
+   o drawBase só estica a imagem pro zoom/pan atual (mesmo truque das fronteiras). */
+const SAT_W = 2048, SAT_H = 1024;
+const satOceanCanvas = document.createElement('canvas');
+const satLandCanvas = document.createElement('canvas');
+let satReady = false;
+
+// [lon, lat, raio em lon, raio em lat, intensidade]
+const SAT_DESERTS = [
+  [8, 23, 30, 10, 1],        // Saara
+  [-9, 23, 9, 7, 1],         // Saara ocidental / Mauritânia
+  [26, 25, 11, 8, 1],        // deserto da Líbia / Egito
+  [0, 15, 20, 4, 0.45],      // Sahel (transição)
+  [47, 23, 12, 9, 1],        // Península Arábica
+  [58, 30, 11, 6, 0.85],     // Irã / Paquistão
+  [71, 27, 4, 3, 0.7],       // Thar
+  [60, 41, 8, 4, 0.75],      // Karakum / Kyzylkum
+  [84, 39, 9, 3.5, 0.9],     // Taklamakan
+  [104, 43, 13, 4.5, 0.8],   // Gobi
+  [88, 33, 10, 4, 0.45],     // planalto tibetano (estepe fria)
+  [133, -25, 16, 8, 0.9],    // interior australiano
+  [19, -24, 7, 6, 0.8],      // Kalahari / Namíbia
+  [45, 7, 6, 5, 0.6],        // Chifre da África
+  [-70, -23, 2.5, 7, 0.95],  // Atacama
+  [-68, -44, 4, 6, 0.55],    // Patagônia
+  [-113, 33, 8, 6, 0.75],    // sudoeste dos EUA / Sonora
+  [-104, 27, 4, 4, 0.5],     // Chihuahua
+  [-40, -8, 4, 3, 0.35],     // sertão nordestino
+];
+const SAT_MOUNTAINS = [
+  [84, 30, 14, 3.5, 1],      // Himalaia
+  [88, 34, 14, 4, 0.7],      // Tibete
+  [76, 37, 6, 3, 0.85],      // Karakoram / Pamir
+  [80, 42, 8, 2, 0.7],       // Tian Shan
+  [-78, -4, 3, 9, 0.9],      // Andes norte
+  [-69, -20, 3, 10, 1],      // Andes centrais
+  [-70, -36, 2, 9, 0.9],     // Andes sul
+  [-113, 45, 7, 12, 0.75],   // Rochosas
+  [-124, 56, 5, 8, 0.6],     // Costeiras do Canadá
+  [10, 46, 5, 1.6, 0.8],     // Alpes
+  [44, 42, 4, 1.5, 0.7],     // Cáucaso
+  [50, 32, 5, 4, 0.55],      // Zagros
+  [39, 9, 4, 4, 0.6],        // planalto etíope
+  [148, -30, 2.2, 10, 0.4],  // Grande Cordilheira Divisória
+  [-2, 32, 6, 2, 0.5],       // Atlas
+  [100, 50, 12, 4, 0.45],    // Altai / Sayan
+  [-150, 63, 12, 4, 0.55],   // Alasca
+];
+// cor da vegetação por |latitude|: floresta tropical -> savana -> temperado -> taiga -> tundra
+const SAT_VEG = [
+  [0, 22, 58, 24],
+  [9, 30, 70, 28],
+  [17, 104, 112, 56],
+  [26, 82, 104, 50],
+  [36, 88, 100, 54],
+  [46, 56, 90, 40],
+  [56, 36, 64, 36],
+  [64, 92, 90, 70],
+  [74, 138, 134, 116],
+];
+
+function blobField(list, lon, lat) {
+  let v = 0;
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i];
+    const dx = (((lon - b[0] + 540) % 360) - 180) / b[2];
+    const dy = (lat - b[1]) / b[3];
+    const d = dx * dx + dy * dy;
+    if (d < 1) {
+      const w = (1 - smoothstep(0.3, 1, d)) * b[4];
+      if (w > v) v = w;
+    }
+  }
+  return v;
+}
+
+function vnoise(x, y, period) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const tx = x - xi, ty = y - yi;
+  const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+  const x0 = ((xi % period) + period) % period, x1 = (x0 + 1) % period;
+  const a = hash2(x0, yi), b = hash2(x1, yi), c = hash2(x0, yi + 1), d = hash2(x1, yi + 1);
+  return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+}
+
+// fBm periódico na longitude (u, v em [0,1]) — sem emenda no antimeridiano
+function fbm(u, v, octaves) {
+  let sum = 0, amp = 0.5, norm = 0, f = 24;
+  for (let o = 0; o < octaves; o++) {
+    sum += amp * vnoise(u * f, v * f * 0.5 + o * 17.3, f);
+    norm += amp;
+    amp *= 0.5;
+    f *= 2;
+  }
+  return sum / norm;
+}
+
+function vegColor(alat, out) {
+  const s = SAT_VEG;
+  for (let k = 1; k < s.length; k++) {
+    if (alat <= s[k][0]) {
+      const t = Math.max(0, (alat - s[k - 1][0]) / (s[k][0] - s[k - 1][0]));
+      for (let c = 0; c < 3; c++) out[c] = s[k - 1][c + 1] + (s[k][c + 1] - s[k - 1][c + 1]) * t;
+      return;
+    }
+  }
+  const last = s[s.length - 1];
+  out[0] = last[1]; out[1] = last[2]; out[2] = last[3];
+}
+
+function nearLand(mx, my) {
+  for (let dy = -1; dy <= 1; dy++) {
+    const yy = my + dy;
+    if (yy < 0 || yy >= MH) continue;
+    for (let dx = -1; dx <= 1; dx++) {
+      const xx = (mx + dx + MW) % MW;
+      if (landData[(yy * MW + xx) * 4] > 128) return true;
+    }
+  }
+  return false;
+}
+
+function buildOceanTexture() {
+  satOceanCanvas.width = SAT_W;
+  satOceanCanvas.height = SAT_H;
+  const oc = satOceanCanvas.getContext('2d');
+
+  // azul profundo, um pouco mais escuro e acinzentado nas altas latitudes
+  const g = oc.createLinearGradient(0, 0, 0, SAT_H);
+  g.addColorStop(0, '#0a2140');
+  g.addColorStop(0.3, '#0d3161');
+  g.addColorStop(0.5, '#0f3a70');
+  g.addColorStop(0.7, '#0d3161');
+  g.addColorStop(1, '#081c38');
+  oc.fillStyle = g;
+  oc.fillRect(0, 0, SAT_W, SAT_H);
+
+  // variação suave de tom (correntes/fitoplâncton vistos do espaço), em baixa resolução
+  const nw = 512, nh = 256;
+  const nc = document.createElement('canvas');
+  nc.width = nw; nc.height = nh;
+  const nctx = nc.getContext('2d');
+  const nimg = nctx.createImageData(nw, nh);
+  for (let y = 0; y < nh; y++) {
+    for (let x = 0; x < nw; x++) {
+      const n = fbm(x / nw, y / nh + 3.1, 3);
+      const o = (y * nw + x) * 4;
+      nimg.data[o] = 0; nimg.data[o + 1] = 10; nimg.data[o + 2] = 30;
+      nimg.data[o + 3] = Math.round(Math.max(0, n - 0.35) * 150);
+    }
+  }
+  nctx.putImageData(nimg, 0, 0);
+  oc.imageSmoothingEnabled = true;
+  oc.drawImage(nc, 0, 0, SAT_W, SAT_H);
+
+  // plataforma continental: halos claros em volta da costa (água rasa) -> gradiente de profundidade
+  const sp = d3.geoEquirectangular().translate([SAT_W / 2, SAT_H / 2]).scale(SAT_W / (2 * Math.PI));
+  const spath = d3.geoPath(sp, oc);
+  if (typeof oc.filter === 'string') {
+    const layers = [
+      ['blur(16px)', 'rgba(30,96,150,0.55)'],
+      ['blur(6px)', 'rgba(52,138,180,0.55)'],
+      ['blur(1.8px)', 'rgba(90,176,200,0.5)'],
+    ];
+    for (const [f, c] of layers) {
+      oc.filter = f;
+      oc.fillStyle = c;
+      oc.beginPath();
+      spath(land);
+      oc.fill();
+    }
+    oc.filter = 'none';
+  } else {
+    oc.lineJoin = 'round';
+    for (const [w, c] of [[12, 'rgba(30,96,150,0.3)'], [6, 'rgba(52,138,180,0.35)'], [2, 'rgba(90,176,200,0.4)']]) {
+      oc.lineWidth = w;
+      oc.strokeStyle = c;
+      oc.beginPath();
+      spath(land);
+      oc.stroke();
+    }
+  }
+}
+
+function buildLandTexture() {
+  satLandCanvas.width = SAT_W;
+  satLandCanvas.height = SAT_H;
+  const lc = satLandCanvas.getContext('2d');
+  const img = lc.createImageData(SAT_W, SAT_H);
+  const px = img.data;
+  const hgt = new Float32Array(SAT_W * SAT_H);
+  const need = new Uint8Array(SAT_W * SAT_H);
+
+  // campos de aridez/montanha numa grade grossa de 0,5° (interpolados depois), com
+  // "domain warping": cada ponto consulta as elipses num lugar deslocado por ruído,
+  // o que deixa os contornos dos desertos e cordilheiras orgânicos em vez de ovais.
+  const CW = 720, CH = 360;
+  const ARID = new Float32Array(CW * CH), MNT = new Float32Array(CW * CH);
+  for (let cy = 0; cy < CH; cy++) {
+    const lat = 90 - (cy + 0.5) * 0.5;
+    const v = (cy + 0.5) / CH;
+    for (let cx = 0; cx < CW; cx++) {
+      const lon = -180 + (cx + 0.5) * 0.5;
+      const u = (cx + 0.5) / CW;
+      const wx = (fbm(u, v + 5.3, 4) - 0.5) * 26;
+      const wy = (fbm(u, v + 11.1, 4) - 0.5) * 14;
+      const patch = 0.55 + 0.9 * fbm(u, v + 23.7, 3); // falhas/manchas internas
+      ARID[cy * CW + cx] = Math.min(1, blobField(SAT_DESERTS, lon + wx, lat + wy) * patch);
+      MNT[cy * CW + cx] = blobField(SAT_MOUNTAINS, lon + wx * 0.35, lat + wy * 0.35);
+    }
+  }
+  const coarse = (arr, x, y) => {
+    let fx = (x + 0.5) / SAT_W * CW - 0.5, fy = (y + 0.5) / SAT_H * CH - 0.5;
+    if (fy < 0) fy = 0; else if (fy > CH - 1) fy = CH - 1;
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const tx = fx - x0, ty = fy - y0;
+    const xa = (x0 + CW) % CW, xb = (x0 + 1) % CW, yb = Math.min(CH - 1, y0 + 1);
+    const a = arr[y0 * CW + xa], b = arr[y0 * CW + xb], c = arr[yb * CW + xa], d = arr[yb * CW + xb];
+    return a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty;
+  };
+
+  // passo 1: só pixels de terra (+ margem); acima de 84° a Antártida/Groenlândia já vêm pintadas
+  for (let y = 0; y < SAT_H; y++) {
+    const lat = 90 - (y + 0.5) / SAT_H * 180;
+    if (Math.abs(lat) > 84) continue;
+    const my = Math.min(MH - 1, (y * MH / SAT_H) | 0);
+    const v = (y + 0.5) / SAT_H;
+    for (let x = 0; x < SAT_W; x++) {
+      if (!nearLand((x * MW / SAT_W) | 0, my)) continue;
+      const i = y * SAT_W + x;
+      need[i] = 1;
+      hgt[i] = fbm((x + 0.5) / SAT_W, v, 6);
+    }
+  }
+
+  // passo 2: cor do bioma + deserto + rocha/neve de montanha + relevo sombreado (luz de NO)
+  const veg = [0, 0, 0];
+  for (let y = 0; y < SAT_H; y++) {
+    const lat = 90 - (y + 0.5) / SAT_H * 180;
+    const alat = Math.abs(lat);
+    vegColor(alat, veg);
+    for (let x = 0; x < SAT_W; x++) {
+      const i = y * SAT_W + x;
+      if (!need[i]) continue;
+      const h = hgt[i];
+      const A0 = coarse(ARID, x, y), M = coarse(MNT, x, y);
+      let r = veg[0], g = veg[1], b = veg[2];
+
+      // aridez em degradê natural: verde -> estepe -> areia, com bordas irregulares pelo ruído
+      if (A0 > 0) {
+        const steppeW = smoothstep(0, 0.5, A0 + (h - 0.5) * 0.9) * 0.8;
+        r += (150 - r) * steppeW; g += (136 - g) * steppeW; b += (86 - b) * steppeW;
+        const sandW = smoothstep(0.38, 0.85, A0 + (h - 0.5) * 1.3);
+        const sandT = smoothstep(0.3, 0.7, h); // areia clara x avermelhada
+        r += ((224 + (198 - 224) * sandT) - r) * sandW;
+        g += ((190 + (142 - 190) * sandT) - g) * sandW;
+        b += ((132 + (84 - 132) * sandT) - b) * sandW;
+      }
+
+      const rockW = M * smoothstep(0.35, 0.75, h) * 0.85;
+      r += (124 - r) * rockW; g += (108 - g) * rockW; b += (90 - b) * rockW;
+      const peakW = M * smoothstep(0.58, 0.76, h) * (M > 0.5 ? 1 : 0.4) * (alat > 40 ? 1.25 : 1);
+      // calotas polares: linha de neve irregular (ruído) em vez de uma faixa reta de latitude
+      const polarW = alat > 50 ? smoothstep(60, 71, alat + (h - 0.5) * 18) : 0;
+      const snowW = Math.min(1, Math.max(peakW, polarW));
+      r += (234 - r) * snowW; g += (239 - g) * snowW; b += (243 - b) * snowW;
+
+      const xl = x > 0 ? i - 1 : i + SAT_W - 1;
+      const xr = x < SAT_W - 1 ? i + 1 : i - SAT_W + 1;
+      const up = y > 0 ? i - SAT_W : i, dn = y < SAT_H - 1 ? i + SAT_W : i;
+      const hl = need[xl] ? hgt[xl] : h, hr = need[xr] ? hgt[xr] : h;
+      const hu = need[up] ? hgt[up] : h, hd = need[dn] ? hgt[dn] : h;
+      let shade = 1 + ((hl + hu) - (hr + hd)) * (5 + 16 * M);
+      if (shade < 0.62) shade = 0.62; else if (shade > 1.38) shade = 1.38;
+      const k = shade * (0.8 + 0.4 * h) * (0.95 + 0.1 * hash2(x, y));
+
+      const o = i * 4;
+      px[o] = Math.min(255, r * k);
+      px[o + 1] = Math.min(255, g * k);
+      px[o + 2] = Math.min(255, b * k);
+      px[o + 3] = 255;
+    }
+  }
+  lc.putImageData(img, 0, 0);
+}
+
+function buildSatelliteTextures() {
+  if (!land || !landData) return;
+  buildOceanTexture();
+  buildLandTexture();
+  satReady = true;
+}
+
 /* ---------- campo de correntes ---------- */
 function prepCurrents() {
   for (const c of CURRENTS) {
@@ -679,7 +1012,8 @@ function seedParticles() {
 }
 
 const SEGS = [[], [], [], [], [], [], [], [], []];
-const TEMPCOL = ['232,104,44', '226,158,46', '20,86,170'];
+// quentes / amenas / frias — tons claros pra ler bem sobre o oceano azul-escuro do satélite
+const TEMPCOL = ['255,138,76', '255,222,128', '130,210,255'];
 const DARKFLOW = '10,26,54';
 const S_ALPHA = [0.32, 0.62, 0.98];
 const S_WIDTH = [0.8, 1.5, 2.5];
@@ -779,55 +1113,48 @@ function frame(now) {
 /* ---------- camada base (SST + grade + terra) ---------- */
 function drawBase() {
   bctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  bctx.fillStyle = showSST ? '#e9eef2' : MAP.ocean;
+  bctx.fillStyle = MAP.ocean;
   bctx.fillRect(0, 0, W, H);
 
-  if (showSST && sstReady) {
-    bctx.imageSmoothingEnabled = true;
-    bctx.imageSmoothingQuality = 'high';
-    bctx.drawImage(sstCanvas, 0, 0, TW, TH,
-      originX, originY, 360 * scaleK, 180 * scaleK);
-  }
+  const wx = originX, wy = originY, ww = 360 * scaleK, wh = 180 * scaleK;
+  bctx.imageSmoothingEnabled = true;
+  bctx.imageSmoothingQuality = 'high';
 
-  if (showGrat) {
-    bctx.beginPath();
-    geoPath(graticule);
-    bctx.strokeStyle = MAP.grat;
-    bctx.lineWidth = 0.75;
-    bctx.stroke();
+  if (showSST && sstReady) {
+    bctx.drawImage(sstCanvas, 0, 0, TW, TH, wx, wy, ww, wh);
+  } else if (satReady) {
+    bctx.drawImage(satOceanCanvas, wx, wy, ww, wh);
+    if (MAP.oceanDim) { bctx.fillStyle = MAP.oceanDim; bctx.fillRect(0, 0, W, H); }
   }
 
   if (land) {
     bctx.save();
     bctx.beginPath();
     geoPath(land);
-    bctx.shadowColor = MAP.landShadow;
-    bctx.shadowBlur = 9;
-    bctx.shadowOffsetX = 1.5;
-    bctx.shadowOffsetY = 2.5;
-    bctx.fillStyle = MAP.land;
+    bctx.fillStyle = MAP.land; // base lisa: cobre ilhas pequenas demais pra máscara da textura
     bctx.fill();
+    if (satReady) {
+      bctx.clip();
+      bctx.drawImage(satLandCanvas, wx, wy, ww, wh);
+      if (MAP.landDim) { bctx.fillStyle = MAP.landDim; bctx.fillRect(0, 0, W, H); }
+    }
     bctx.restore();
-    bctx.beginPath();
-    geoPath(land);
-    bctx.fillStyle = MAP.land;
-    bctx.fill();
+    // o path atual não faz parte do estado salvo — o contorno reaproveita o mesmo traçado
     bctx.strokeStyle = MAP.landLine;
-    bctx.lineWidth = 0.7;
+    bctx.lineWidth = 0.6;
     bctx.stroke();
   }
 
-  if (iceCaps) {
-    bctx.beginPath();
-    geoPath(iceCaps);
-    bctx.fillStyle = MAP.ice;
-    bctx.fill();
-    bctx.strokeStyle = MAP.iceLine;
-    bctx.lineWidth = 0.7;
-    bctx.stroke();
-  }
-
+  drawPolarIce();
   drawCountryBorders();
+
+  if (showGrat) {
+    bctx.beginPath();
+    geoPath(graticule);
+    bctx.strokeStyle = MAP.grat;
+    bctx.lineWidth = 0.6;
+    bctx.stroke();
+  }
 
   if (!panning) {
     labelRects = [];
@@ -835,6 +1162,221 @@ function drawBase() {
     if (showNavRoutes) drawNavRoutes();
     drawOceanLabels();
   }
+
+  if (showPorts) drawPorts();
+  else portScreenPos = [];
+
+  drawOilSpill();
+  drawFishHeatmap();
+}
+
+/* ---------- camada de simulação: mancha de vazamento de óleo (Copiloto IA) ---------- */
+function traceLL(pts) {
+  bctx.beginPath();
+  let prev = null;
+  for (let i = 0; i < pts.length; i++) {
+    const s = project(normLon(pts[i][0]), pts[i][1]);
+    if (!prev || Math.abs(s[0] - prev[0]) > 180 * scaleK) bctx.moveTo(s[0], s[1]); // quebra no antimeridiano
+    else bctx.lineTo(s[0], s[1]);
+    prev = s;
+  }
+}
+
+function spillEllipse(f) {
+  const s = project(normLon(f.lon), f.lat);
+  const ry = Math.max(2, (f.radius_km / 111) * scaleK);
+  const rx = ry / Math.max(0.2, Math.cos(f.lat * Math.PI / 180)); // km -> graus de longitude
+  return [s[0], s[1], rx, ry];
+}
+
+function drawAlertMarker(x, y) {
+  const s = 9;
+  bctx.save();
+  bctx.beginPath();
+  bctx.moveTo(x, y - s);
+  bctx.lineTo(x + s * 0.95, y + s * 0.7);
+  bctx.lineTo(x - s * 0.95, y + s * 0.7);
+  bctx.closePath();
+  bctx.shadowColor = 'rgba(255,40,20,0.9)';
+  bctx.shadowBlur = 10;
+  bctx.fillStyle = '#ff3b30';
+  bctx.fill();
+  bctx.restore();
+  bctx.lineJoin = 'round';
+  bctx.lineWidth = 1.4;
+  bctx.strokeStyle = '#fff';
+  bctx.stroke();
+  bctx.fillStyle = '#fff';
+  bctx.font = '800 10px "Inter","Segoe UI",sans-serif';
+  bctx.textAlign = 'center';
+  bctx.textBaseline = 'middle';
+  bctx.fillText('!', x, y + 1.5);
+}
+
+function drawShipMarker(x, y, angle, aground) {
+  bctx.save();
+  bctx.translate(x, y);
+  bctx.rotate(angle);
+  bctx.beginPath(); // casco com a proa apontando no sentido da deriva
+  bctx.moveTo(10, 0);
+  bctx.quadraticCurveTo(3, -5.5, -7, -4.5);
+  bctx.lineTo(-7, 4.5);
+  bctx.quadraticCurveTo(3, 5.5, 10, 0);
+  bctx.closePath();
+  bctx.shadowColor = 'rgba(0,0,0,0.65)';
+  bctx.shadowBlur = 6;
+  bctx.fillStyle = aground ? '#ff9f1a' : '#ffd23f';
+  bctx.fill();
+  bctx.shadowBlur = 0;
+  bctx.lineWidth = 1.2;
+  bctx.strokeStyle = '#3a2a00';
+  bctx.stroke();
+  bctx.fillStyle = '#3a2a00';
+  bctx.fillRect(-4.5, -2, 5, 4); // ponte de comando
+  bctx.restore();
+}
+
+function drawMapTag(text, x, y, color, align) {
+  bctx.font = '700 10.5px "Inter","Segoe UI",sans-serif';
+  bctx.textAlign = align || 'left';
+  bctx.textBaseline = 'middle';
+  bctx.lineJoin = 'round';
+  bctx.lineWidth = 3.2;
+  bctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  bctx.strokeText(text, x, y);
+  bctx.fillStyle = color;
+  bctx.fillText(text, x, y);
+}
+
+function drawOilSpill() {
+  if (!oilSpill || !oilSpill.frames || !oilSpill.frames.length) return;
+  const frames = oilSpill.frames;
+  const n = frames.length;
+  const origin = [normLon(oilSpill.origin.lon), oilSpill.origin.lat];
+
+  // rota do navio em que ocorreu o incidente (contexto)
+  if (oilSpill.shipRoute && oilSpill.shipRoute.length > 1) {
+    traceLL(oilSpill.shipRoute);
+    bctx.setLineDash([3, 5]);
+    bctx.lineCap = 'round';
+    bctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    bctx.lineWidth = 1.6;
+    bctx.stroke();
+    bctx.setLineDash([]);
+  }
+
+  // mancha: união de todas as posições hora a hora num único preenchimento (sem acumular opacidade)
+  bctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const e = spillEllipse(frames[i]);
+    bctx.moveTo(e[0] + e[2], e[1]);
+    bctx.ellipse(e[0], e[1], e[2], e[3], 0, 0, Math.PI * 2);
+  }
+  bctx.fillStyle = 'rgba(214,28,28,0.26)';
+  bctx.fill();
+
+  // mancha atual (mais densa no centro), expandida conforme o tempo informado
+  const eL = spillEllipse(frames[n - 1]);
+  const grad = bctx.createRadialGradient(eL[0], eL[1], 0, eL[0], eL[1], Math.max(eL[2], eL[3]));
+  grad.addColorStop(0, 'rgba(90,0,0,0.6)');
+  grad.addColorStop(0.6, 'rgba(170,10,10,0.38)');
+  grad.addColorStop(1, 'rgba(230,40,30,0.14)');
+  bctx.beginPath();
+  bctx.ellipse(eL[0], eL[1], eL[2], eL[3], 0, 0, Math.PI * 2);
+  bctx.fillStyle = grad;
+  bctx.fill();
+  bctx.strokeStyle = 'rgba(255,95,70,0.9)';
+  bctx.lineWidth = 1.2;
+  bctx.stroke();
+
+  // trajeto pontilhado da deriva: origem -> posição a cada hora
+  traceLL([origin].concat(frames.map((f) => [f.lon, f.lat])));
+  bctx.setLineDash([2.5, 4]);
+  bctx.lineJoin = 'round';
+  bctx.lineCap = 'round';
+  bctx.strokeStyle = 'rgba(255,120,40,0.95)';
+  bctx.lineWidth = 2;
+  bctx.stroke();
+  bctx.setLineDash([]);
+
+  // origem da avaria + navio na posição atual (orientado pelo último trecho de deriva)
+  const sO = project(origin[0], origin[1]);
+  const last = frames[n - 1];
+  const sL = project(normLon(last.lon), last.lat);
+  const ref = n > 1 ? frames[Math.max(0, n - 4)] : { lon: origin[0], lat: origin[1] };
+  const sR = project(normLon(ref.lon), ref.lat);
+  const moved = Math.hypot(sL[0] - sR[0], sL[1] - sR[1]) > 0.5;
+  const angle = moved ? Math.atan2(sL[1] - sR[1], sL[0] - sR[0]) : -Math.PI / 2;
+
+  drawAlertMarker(sO[0], sO[1]);
+  drawShipMarker(sL[0], sL[1], angle, !!oilSpill.aground);
+  if (!panning) {
+    // rótulos em lados opostos, conforme a direção da deriva, pra não se sobreporem
+    const right = sL[0] >= sO[0];
+    drawMapTag('Avaria', sO[0] + (right ? -12 : 12), sO[1] - 10, '#ffb3a8', right ? 'right' : 'left');
+    drawMapTag('Navio · T+' + (oilSpill.drift_hours || last.hour) + ' h',
+      sL[0] + (right ? 13 : -13), sL[1] + 11, '#ffe38a', right ? 'left' : 'right');
+  }
+}
+
+/* ---------- camada de simulação: heatmap de cardumes (Copiloto IA) ---------- */
+function drawFishHeatmap() {
+  if (!fishHotspots || !fishHotspots.hotspots || !fishHotspots.hotspots.length) return;
+  for (const h of fishHotspots.hotspots) {
+    const s = project(h.lon, h.lat);
+    const r = 16 + h.score * 30;
+    const g = bctx.createRadialGradient(s[0], s[1], 0, s[0], s[1], r);
+    g.addColorStop(0, 'rgba(90,255,195,' + (0.55 * h.score + 0.15).toFixed(3) + ')');
+    g.addColorStop(1, 'rgba(90,255,195,0)');
+    bctx.fillStyle = g;
+    bctx.beginPath();
+    bctx.arc(s[0], s[1], r, 0, Math.PI * 2);
+    bctx.fill();
+  }
+}
+
+/* ---------- hover explicativo sobre as camadas de simulação (cardumes / vazamento e deriva) ---------- */
+function findFishHotspotAt(px, py) {
+  if (!fishHotspots || !fishHotspots.hotspots) return null;
+  for (const h of fishHotspots.hotspots) {
+    const s = project(h.lon, h.lat);
+    const r = 16 + h.score * 30;
+    if (Math.hypot(px - s[0], py - s[1]) <= r) return h;
+  }
+  return null;
+}
+
+function findOilHoverAt(px, py) {
+  if (!oilSpill || !oilSpill.frames || !oilSpill.frames.length) return null;
+  const frames = oilSpill.frames;
+  let prev = project(oilSpill.origin.lon, oilSpill.origin.lat);
+  for (let i = 0; i < frames.length; i++) {
+    const cur = project(frames[i].lon, frames[i].lat);
+    if (Math.abs(cur[0] - prev[0]) <= W * 0.5 && distToSegment(px, py, prev[0], prev[1], cur[0], cur[1]) <= 7) {
+      return oilSpill;
+    }
+    const rPx = Math.max(2, (frames[i].radius_km / 111) * scaleK);
+    if (Math.hypot(px - cur[0], py - cur[1]) <= rPx) return oilSpill;
+    prev = cur;
+  }
+  return null;
+}
+
+function showSimTooltip(mx, my, kind, title, body) {
+  const el = document.getElementById('sim-tooltip');
+  if (!el) return;
+  el.classList.toggle('is-fish', kind === 'fish');
+  el.classList.toggle('is-oil', kind === 'oil');
+  document.getElementById('sim-tt-title').textContent = title;
+  document.getElementById('sim-tt-body').textContent = body;
+  el.style.left = mx + 'px';
+  el.style.top = my + 'px';
+  el.hidden = false;
+}
+
+function hideSimTooltip() {
+  const el = document.getElementById('sim-tooltip');
+  if (el) el.hidden = true;
 }
 
 /* ---------- fronteiras dos países ----------
@@ -863,8 +1405,78 @@ function buildBordersTexture() {
   bordersReady = true;
 }
 
+/* ---------- gelo/neve polar (>60°N, <60°S, Groenlândia e Antártida) ---------- */
+function drawPolarIce() {
+  if (!land) return;
+  if (satReady) { // a textura de satélite já traz a linha de neve irregular — só os mantos de gelo
+    drawIceSheets(0.9);
+    return;
+  }
+
+  bctx.save();
+  bctx.beginPath();
+  geoPath(land);
+  bctx.clip();
+
+  const yHardN = project(0, POLAR_HARD_LAT)[1];
+  const ySoftN = project(0, POLAR_SOFT_LAT)[1];
+  const yHardS = project(0, -POLAR_HARD_LAT)[1];
+  const ySoftS = project(0, -POLAR_SOFT_LAT)[1];
+
+  // calota norte: degradê ice -> iceShade até 65°N, depois iceShade -> transparente até 55°N
+  let g = bctx.createLinearGradient(0, 0, 0, Math.max(1, yHardN));
+  g.addColorStop(0, MAP.ice);
+  g.addColorStop(1, MAP.iceShade);
+  bctx.fillStyle = g;
+  bctx.fillRect(0, 0, W, Math.max(0, yHardN));
+  g = bctx.createLinearGradient(0, yHardN, 0, ySoftN);
+  g.addColorStop(0, MAP.iceShade);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  bctx.fillStyle = g;
+  bctx.fillRect(0, yHardN, W, Math.max(0, ySoftN - yHardN));
+
+  // calota sul: degradê ice -> iceShade abaixo de 65°S, depois iceShade -> transparente até 55°S
+  g = bctx.createLinearGradient(0, H, 0, Math.min(H - 1, yHardS));
+  g.addColorStop(0, MAP.ice);
+  g.addColorStop(1, MAP.iceShade);
+  bctx.fillStyle = g;
+  bctx.fillRect(0, yHardS, W, Math.max(0, H - yHardS));
+  g = bctx.createLinearGradient(0, yHardS, 0, ySoftS);
+  g.addColorStop(0, MAP.iceShade);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  bctx.fillStyle = g;
+  bctx.fillRect(0, ySoftS, W, Math.max(0, yHardS - ySoftS));
+
+  bctx.restore();
+  drawIceSheets(1);
+}
+
+// Groenlândia e Antártida: gelo por inteiro, mesmo na parte que escapa da faixa de latitude
+function drawIceSheets(alpha) {
+  if (!polarTerritories || !polarTerritories.features.length) return;
+  bctx.beginPath();
+  geoPath(polarTerritories);
+  bctx.globalAlpha = alpha;
+  bctx.fillStyle = MAP.ice;
+  bctx.fill();
+  bctx.globalAlpha = 1;
+  bctx.strokeStyle = MAP.iceLine;
+  bctx.lineWidth = 0.7;
+  bctx.stroke();
+}
+
 function drawCountryBorders() {
   if (!bordersReady) return;
+  if (Z >= 2.5 && countries) { // aproximado: a textura esticada fica borrada — traça em vetor
+    bctx.beginPath();
+    geoPath(countries);
+    bctx.setLineDash([5, 4]);
+    bctx.strokeStyle = MAP.border;
+    bctx.lineWidth = 0.9;
+    bctx.stroke();
+    bctx.setLineDash([]);
+    return;
+  }
   bctx.imageSmoothingEnabled = true;
   bctx.imageSmoothingQuality = 'high';
   bctx.drawImage(bordersCanvas, 0, 0, BW, BH, originX, originY, 360 * scaleK, 180 * scaleK);
@@ -1010,9 +1622,111 @@ function drawOceanLabels() {
   }
 }
 
+/* ---------- portos de desembarque (marcadores, com LOD por zoom) ---------- */
+const PORT_HIT_RADIUS = 9; // px — raio de detecção do hover/clique, maior que o desenho p/ facilitar o toque
+function drawPorts() {
+  portScreenPos = [];
+  if (!PORTS.length) return;
+  const vb = viewBounds();
+
+  for (let i = 0; i < PORTS.length; i++) {
+    const p = PORTS[i];
+    const meta = portMeta(p);
+    if (Z < meta.minZ) continue; // LOD: ainda não deu zoom suficiente pra este nível de porto
+    if (p.lon < vb.lon0 || p.lon > vb.lon1 || p.lat < vb.lat0 || p.lat > vb.lat1) continue;
+    const s = project(p.lon, p.lat);
+    if (s[0] < -10 || s[0] > W + 10 || s[1] < -10 || s[1] > H + 10) continue;
+
+    portScreenPos.push({ x: s[0], y: s[1], port: p });
+
+    const isHub = p.size === 'Grande Hub';
+    bctx.beginPath();
+    bctx.arc(s[0], s[1], meta.r, 0, Math.PI * 2);
+    bctx.fillStyle = MAP.port;
+    bctx.shadowColor = MAP.portGlow;
+    bctx.shadowBlur = meta.glow;
+    bctx.fill();
+    bctx.shadowBlur = 0;
+    bctx.lineWidth = isHub ? 1.8 : 1.2;
+    bctx.strokeStyle = MAP.portRing;
+    bctx.stroke();
+
+    if (isHub) { // halo extra — destaque "neon" pros grandes hubs
+      bctx.beginPath();
+      bctx.arc(s[0], s[1], meta.r + 3.5, 0, Math.PI * 2);
+      bctx.strokeStyle = MAP.portGlow;
+      bctx.lineWidth = 1.2;
+      bctx.stroke();
+    }
+
+    bctx.beginPath();
+    bctx.arc(s[0], s[1], 1.3, 0, Math.PI * 2);
+    bctx.fillStyle = MAP.portRing;
+    bctx.fill();
+  }
+}
+
+function findPortAt(x, y) {
+  let best = null, bestD = PORT_HIT_RADIUS * PORT_HIT_RADIUS;
+  for (let i = 0; i < portScreenPos.length; i++) {
+    const s = portScreenPos[i];
+    const dx = s.x - x, dy = s.y - y;
+    const d = dx * dx + dy * dy;
+    if (d <= bestD) { bestD = d; best = s.port; }
+  }
+  return best;
+}
+
+/* ---------- menu de busca origem/destino (seleção de rota restrita a portos) ---------- */
+function populatePortSelectors() {
+  const groups = ['Grande Hub', 'Porto Regional', 'Ancoradouro/Terminal'];
+  const sorted = groups.map((g) => ({
+    label: g,
+    ports: PORTS.filter((p) => p.size === g).sort((a, b) => a.name.localeCompare(b.name)),
+  }));
+
+  for (const selId of ['r-origin', 'r-dest']) {
+    const sel = document.getElementById(selId);
+    if (!sel) continue;
+    for (const g of sorted) {
+      if (!g.ports.length) continue;
+      const og = document.createElement('optgroup');
+      og.label = g.label;
+      for (const p of g.ports) {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name + ' — ' + p.country;
+        og.appendChild(opt);
+      }
+      sel.appendChild(og);
+    }
+  }
+}
+
+function routeFromSelectors() {
+  const originId = document.getElementById('r-origin').value;
+  const destId = document.getElementById('r-dest').value;
+  if (!originId || !destId) return;
+  const pa = PORT_BY_ID.get(originId), pb = PORT_BY_ID.get(destId);
+  if (!pa || !pb) return;
+  if (pa.id === pb.id) { routeInfoEl.textContent = 'Escolha portos de origem e destino diferentes.'; return; }
+
+  if (emergencyMode) setEmergencyMode(false);
+  routeMode = null;
+  flowCanvas.classList.remove('picking');
+  routeIsEmergency = false;
+  routeA = [pa.lon, pa.lat]; routeAPort = pa;
+  routeB = [pb.lon, pb.lat]; routeBPort = pb;
+  computeRoute();
+}
+
 /* ---------- dimensionamento ---------- */
-function resize() {
+/* shiftX (opcional): quanto a borda esquerda do mapa andou na tela (painel ☰ abrindo/fechando).
+   Com zoom aproximado o conteúdo fica parado na tela e só se revela/cobre a faixa lateral;
+   na vista do mundo inteiro o mapa reescala pra continuar preenchendo 100% da largura. */
+function resize(shiftX) {
   const hadView = scaleK > 0;
+  const prevScale = scaleK, prevOX = originX, prevOY = originY;
   let cLon = 0, cLat = 0;
   if (hadView) { const c = invert(W / 2, H / 2); cLon = c[0]; cLat = c[1]; }
 
@@ -1033,6 +1747,11 @@ function resize() {
     scaleK = baseK; Z = 1;
     originX = (W - 360 * scaleK) / 2;
     originY = (H - 180 * scaleK) / 2;
+  } else if (typeof shiftX === 'number' && prevScale >= baseK) {
+    scaleK = prevScale;
+    Z = scaleK / baseK;
+    originX = prevOX + shiftX;
+    originY = prevOY;
   } else {
     scaleK = baseK * Z;
     originX = W / 2 - (cLon + 180) * scaleK;
@@ -1082,21 +1801,6 @@ async function loadCountries() {
     } catch (e) {}
   }
   return null;
-}
-
-function extractPolar(fc, maxLat) {
-  if (!fc || !fc.features) return null;
-  const north = (coords) => {
-    let m = -Infinity;
-    const walk = (o) => {
-      if (typeof o[0] === 'number') { if (o[1] > m) m = o[1]; }
-      else for (const c of o) walk(c);
-    };
-    walk(coords);
-    return m;
-  };
-  const feats = fc.features.filter((f) => f.geometry && north(f.geometry.coordinates) < maxLat);
-  return feats.length ? { type: 'FeatureCollection', features: feats } : null;
 }
 
 /* ============================================================
@@ -1155,7 +1859,13 @@ function havKm(lo1, la1, lo2, la2) {
   return 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(s)));
 }
 
-function edgeHours(lo1, la1, lo2, la2) {
+/* Custo de aresta do A* = tempo real: Tempo = Distância / |v⃗navio + v⃗corrente|.
+   O navio aproa contra a componente transversal da corrente e avança a
+   sqrt(v² − c⊥²) + c∥ sobre o fundo. kn = velocidade na água (padrão: a de serviço);
+   cw = peso da corrente (0 = planejamento tradicional, que ignora o mar). */
+function edgeHours(lo1, la1, lo2, la2, kn, cw) {
+  if (kn == null) kn = SHIP.kn;
+  if (cw == null) cw = 1;
   const latM = (la1 + la2) / 2;
   let dLon = ((lo2 - lo1 + 540) % 360) - 180;
   const dx = dLon * 111.32 * Math.cos(latM * Math.PI / 180);
@@ -1165,13 +1875,13 @@ function edgeHours(lo1, la1, lo2, la2) {
   const ex = dx / len, ey = dy / len;
 
   const f = sampleField(lo1 + dLon / 2, latM);
-  const S = OD ? 3.6 : 2.0;
+  const S = (OD ? 3.6 : 2.0) * cw;
   const cu = f[0] * S;
   const cv = f[1] * S;
   const cPar = cu * ex + cv * ey;
   const cPerp2 = Math.max(0, cu * cu + cv * cv - cPar * cPar);
 
-  const Vs = SHIP.kn * KMH_PER_KN;
+  const Vs = kn * KMH_PER_KN;
   const avail = Vs * Vs - cPerp2;
   if (avail <= 1) return Infinity;
   const ground = Math.sqrt(avail) + cPar;
@@ -1215,7 +1925,7 @@ class MinHeap {
 
 const NB8 = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
 
-function aStar(aS, oS, aG, oG) {
+function aStar(aS, oS, aG, oG, cw) {
   const N = NLON * NLAT;
   const g = new Float64Array(N).fill(Infinity);
   const came = new Int32Array(N).fill(-1);
@@ -1247,7 +1957,7 @@ function aStar(aS, oS, aG, oG) {
       if (NB8[n][0] !== 0 && NB8[n][1] !== 0) {
         if (!NAV[ca * NLON + no] || !NAV[na * NLON + co]) continue;
       }
-      const dt = edgeHours(clon, clat, navLon(no), navLat(na));
+      const dt = edgeHours(clon, clat, navLon(no), navLat(na), SHIP.kn, cw);
       if (!isFinite(dt)) continue;
       const ng = g[cur] + dt;
       if (ng < g[ni]) {
@@ -1269,19 +1979,128 @@ function aStar(aS, oS, aG, oG) {
   return { path, hours: g[goalI] };
 }
 
-function straightHours(A, B) {
-  let dLon = ((B[0] - A[0] + 540) % 360) - 180;
-  const M = 160;
-  let total = 0;
-  for (let i = 0; i < M; i++) {
-    const lo1 = A[0] + dLon * (i / M), la1 = A[1] + (B[1] - A[1]) * (i / M);
-    const lo2 = A[0] + dLon * ((i + 1) / M), la2 = A[1] + (B[1] - A[1]) * ((i + 1) / M);
-    if (isLandLL(lo1, la1) || isLandLL(lo2, la2)) return null;
-    const dt = edgeHours(lo1, la1, lo2, la2);
-    if (!isFinite(dt)) return null;
-    total += dt;
+/* ---------- comparação das 3 abordagens (espelho de compute_three_routes em ai_agent.py) ----------
+   Calculada no navegador assim que a rota é traçada; quando o servidor Python responde,
+   os números dele (e a análise redigida pelo LLM) substituem estes. */
+const ETA_SLACK = 0.03;       // janela de atracação: até 3% após o A* (ou o ETA da rota comercial)
+const MIN_SPEED_FRAC = 0.75;  // piso de slow steaming
+const SPEED_STEP_KN = 0.25;
+
+// tempo REAL de um trecho já traçado (a corrente age mesmo que o planejamento a ignore)
+function segmentHours(lo1, la1, lo2, la2, kn) {
+  const dt = edgeHours(lo1, la1, lo2, la2, kn, 1);
+  return isFinite(dt) ? dt : havKm(lo1, la1, lo2, la2) / (0.25 * kn * KMH_PER_KN);
+}
+
+function pathHours(p, kn) {
+  let t = 0;
+  for (let i = 1; i < p.length; i++) t += segmentHours(p[i - 1][0], p[i - 1][1], p[i][0], p[i][1], kn);
+  return t;
+}
+
+/* Copiloto IA — gestão de potência: velocidade na água (potência) por trecho que minimiza
+   o VLSFO sem estourar o ETA. Consumo/h ∝ v³, então reduzir o motor onde a corrente empurra
+   custa pouco tempo e economiza muito. Relaxação lagrangiana: λ = preço da hora, por bisseção. */
+function optimizePower(p, kn, etaBudget) {
+  const vmin = Math.max(6, kn * MIN_SPEED_FRAC);
+  const speeds = [];
+  for (let v = kn; v >= vmin - 1e-9; v -= SPEED_STEP_KN) speeds.push(Math.round(v * 100) / 100);
+
+  const segs = [], segKm = [];
+  for (let i = 1; i < p.length; i++) {
+    const [lo1, la1] = p[i - 1], [lo2, la2] = p[i];
+    const opts = [];
+    for (const v of speeds) {
+      const t = edgeHours(lo1, la1, lo2, la2, v, 1);
+      if (isFinite(t)) opts.push([v, t, fuelTonsPerHour(v) * t]);
+    }
+    if (!opts.length) {
+      const t = segmentHours(lo1, la1, lo2, la2, kn);
+      opts.push([kn, t, fuelTonsPerHour(kn) * t]);
+    }
+    segs.push(opts);
+    segKm.push(havKm(lo1, la1, lo2, la2));
   }
-  return total;
+
+  const solve = (lam) => {
+    let T = 0;
+    const pick = segs.map((o) => {
+      let best = o[0], bc = o[0][2] + lam * o[0][1];
+      for (let k = 1; k < o.length; k++) {
+        const c = o[k][2] + lam * o[k][1];
+        if (c < bc) { bc = c; best = o[k]; }
+      }
+      T += best[1];
+      return best;
+    });
+    return [pick, T];
+  };
+
+  let [pick, T] = solve(0);
+  if (T > etaBudget) {
+    let lo = 0, hi = 1;
+    while (solve(hi)[1] > etaBudget && hi < 1e6) hi *= 2;
+    for (let it = 0; it < 45; it++) {
+      const mid = (lo + hi) / 2;
+      if (solve(mid)[1] > etaBudget) lo = mid; else hi = mid;
+    }
+    [pick, T] = solve(hi);
+  }
+
+  const fuel = pick.reduce((s, x) => s + x[2], 0);
+  const km = segKm.reduce((s, x) => s + x, 0);
+  const v = pick.map((x) => x[0]);
+  let ecoKm = 0;
+  v.forEach((sv, i) => { if (sv < kn - 0.01) ecoKm += segKm[i]; });
+  return {
+    km, hours: T, fuel_tons: fuel, co2_tons: fuel * CO2_PER_TON_FUEL,
+    speeds: v,
+    avg_kn: T > 0 ? pick.reduce((s, x) => s + x[0] * x[1], 0) / T : kn,
+    min_kn: v.length ? Math.min(...v) : kn,
+    max_kn: v.length ? Math.max(...v) : kn,
+    load_pct: T > 0 ? 100 * fuel / (fuelTonsPerHour(kn) * T) : 100,
+    eco_share: km > 0 ? ecoKm / km : 0,
+    eta_budget_h: etaBudget,
+    service_kn: kn,
+  };
+}
+
+function localAnalysis(comm, astar, ai) {
+  const dFuel = Math.max(0, comm.fuel_tons - ai.fuel_tons);
+  const pct = comm.fuel_tons > 0 ? 100 * dFuel / comm.fuel_tons : 0;
+  const eta = ai.hours - comm.hours;
+  const etaTxt = eta < -0.05 ? 'chegando ' + nf1(-eta) + ' h antes da rota comercial'
+    : eta > 0.05 ? 'com ETA ' + nf1(eta) + ' h após a rota comercial (dentro da janela de atracação)'
+    : 'mantendo o mesmo ETA da rota comercial';
+  return 'Análise técnica (cálculo local — servidor Python offline): o A* ganha ' +
+    nf1(comm.hours - astar.hours) + ' h sobre a rota comercial explorando as correntes; o Copiloto ' +
+    'converte esse ganho em economia, variando a velocidade entre ' + nf1(ai.min_kn) + ' e ' +
+    nf1(ai.max_kn) + ' nós (média ' + nf1(ai.avg_kn) + ' nós, carga média ' + Math.round(ai.load_pct) +
+    '% da potência de serviço) e reduzindo o motor em ' + Math.round(100 * ai.eco_share) +
+    '% do trajeto. Resultado: −' + nf1(dFuel) + ' t de VLSFO (−' + Math.round(pct) + '%), −' +
+    nf1(dFuel * CO2_PER_TON_FUEL) + ' t de CO₂ e US$ ' + Math.round(dFuel * FUEL_PRICE_USD).toLocaleString('pt-BR') +
+    ' a menos, ' + etaTxt + '.';
+}
+
+// astarRes e commRes: saídas cruas do aStar (com e sem correntes) entre os mesmos nós
+function buildRouteComparison(astarRes, commRes) {
+  const kn = SHIP.kn, rate = fuelTonsPerHour(kn);
+  const commHours = pathHours(commRes.path, kn);
+  let a = astarRes;
+  if (commHours < a.hours) a = { path: commRes.path, hours: commHours }; // A* nunca pior que a comercial
+  const comm = { path: commRes.path, km: pathKm(commRes.path), hours: commHours, fuel_tons: rate * commHours, service_kn: kn };
+  const astar = { path: a.path, km: pathKm(a.path), hours: a.hours, fuel_tons: rate * a.hours, service_kn: kn };
+  const ai = Object.assign({ path: a.path }, optimizePower(a.path, kn, Math.max(commHours, a.hours * (1 + ETA_SLACK))));
+  ai.rationale = localAnalysis(comm, astar, ai);
+  return { baseline: comm, astar, llm: ai };
+}
+
+// suaviza os traçados só pra desenhar (o cálculo usa os nós crus do grafo)
+function prepareVariants(v) {
+  for (const k of ['baseline', 'astar', 'llm']) {
+    if (v[k] && v[k].path && v[k].path.length > 1) v[k].drawPath = smoothPath(v[k].path);
+  }
+  return v;
 }
 
 function pathKm(p) {
@@ -1362,25 +2181,53 @@ function computeNavRoutes() {
   }
 }
 
-function fmtKm(k) { return k >= 1000 ? (k / 1000).toFixed(2) + ' mil km' : k.toFixed(0) + ' km'; }
+function fmtKm(k) { return Math.round(k).toLocaleString('pt-BR') + ' km'; }
+function fmtNm(km) { return Math.round(km * 0.539957).toLocaleString('pt-BR') + ' NM'; }
+function fmtCoord(lat, lon) {
+  const NS = lat >= 0 ? 'N' : 'S', EW = lon >= 0 ? 'E' : 'O';
+  return Math.abs(lat).toFixed(2) + '°' + NS + ', ' + Math.abs(lon).toFixed(2) + '°' + EW;
+}
 function fmtDur(h) {
   if (!isFinite(h)) return '—';
   const d = Math.floor(h / 24), hh = Math.round(h - d * 24);
   return d > 0 ? d + ' d ' + hh + ' h' : hh + ' h';
 }
-function fmtL(l) {
-  return l >= 1e6 ? (l / 1e6).toFixed(2) + ' milhões L' : (l / 1000).toFixed(0) + ' mil L';
+
+/* ---------- Copiloto IA: busca as 3 rotas (Padrão / A* Python / LLM) no backend ---------- */
+function routeVariantsKey(a, b) {
+  return (a && b) ? a[0].toFixed(3) + ',' + a[1].toFixed(3) + '|' + b[0].toFixed(3) + ',' + b[1].toFixed(3) : null;
+}
+
+async function fetchRouteVariants(a, b) {
+  if (location.protocol === 'file:') return; // precisa do servidor local (python servidor.py)
+  const key = routeVariantsKey(a, b);
+  if (!key) return;
+  try {
+    const res = await fetch('/api/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ a, b, speed_kn: SHIP.kn }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (routeVariantsKey(routeA, routeB) !== key) return; // rota mudou enquanto a resposta chegava
+    if (!data.llm || data.llm.service_kn !== SHIP.kn) return; // velocidade mudou no meio do caminho
+    routeVariants = prepareVariants(Object.assign({ key, source: 'server' }, data));
+    drawRoute();
+    const modal = document.getElementById('route-analytics');
+    if (modal && !modal.hidden) openRouteAnalytics(); // atualiza a tabela com os números/análise do servidor
+  } catch (e) { /* backend offline — mapa continua com a rota calculada no cliente */ }
 }
 
 function computeRoute() {
   if (!routeA || !routeB || !NAV) return;
+  routeIsEmergency = false;
+  routeVariants = null;
   routeInfoEl.textContent = 'calculando rota…';
   const s = navSnap(routeA[0], routeA[1]);
   const gg = navSnap(routeB[0], routeB[1]);
   if (!s || !gg) { routePath = null; routeInfoEl.textContent = 'ponto fora do oceano navegável.'; drawRoute(); return; }
 
-  const A = [navLon(s[1]), navLat(s[0])];
-  const B = [navLon(gg[1]), navLat(gg[0])];
   const res = aStar(s[0], s[1], gg[0], gg[1]);
   if (!res || res.path.length < 2) {
     routePath = null;
@@ -1390,43 +2237,162 @@ function computeRoute() {
   }
 
   routePath = smoothPath(res.path);
-  const km = pathKm(routePath);
-  const hOpt = res.hours;
-  const ref = straightHours(A, B);
-  const refKm = havKm(A[0], A[1], B[0], B[1]);
-  const L_PER_H = 2200;
+  const cmp = setClientComparison(s, gg, res);
 
-  let txt = 'Rota otimizada\n  ' + fmtKm(km) + '  ·  ' + fmtDur(hOpt) + '  ·  ~' + fmtL(hOpt * L_PER_H) + '\n';
-  if (ref != null) {
-    const dT = (1 - hOpt / ref) * 100;
-    txt += 'Rota direta\n  ' + fmtKm(refKm) + '  ·  ' + fmtDur(ref) + '  ·  ~' + fmtL(ref * L_PER_H) + '\n';
-    if (dT >= 0.5) txt += '➜ ~' + dT.toFixed(0) + '% menos tempo e combustível (a favor das correntes)';
-    else if (dT <= -0.5) txt += '➜ a reta seria ~' + (-dT).toFixed(0) + '% mais curta em tempo, mas enfrenta correntes';
-    else txt += '➜ praticamente igual à rota direta aqui';
+  let txt = '';
+  if (routeAPort && routeBPort) txt += routeAPort.name + ' → ' + routeBPort.name + '\n';
+  if (cmp) {
+    const c = cmp.baseline, a = cmp.astar, ai = cmp.llm;
+    const pct = (x) => Math.round(100 * (c.fuel_tons - x) / c.fuel_tons);
+    txt += '1. Rota comercial\n  ' + fmtKm(c.km) + '  ·  ' + fmtDur(c.hours) + '  ·  ' + nf1(c.fuel_tons) + ' t\n';
+    txt += '2. A* (correntes)\n  ' + fmtKm(a.km) + '  ·  ' + fmtDur(a.hours) + '  ·  ' + nf1(a.fuel_tons) + ' t (−' + pct(a.fuel_tons) + '%)\n';
+    txt += '3. Copiloto IA (potência)\n  ' + nf1(ai.min_kn) + '–' + nf1(ai.max_kn) + ' nós  ·  ' + fmtDur(ai.hours) +
+           '  ·  ' + nf1(ai.fuel_tons) + ' t (−' + pct(ai.fuel_tons) + '%)';
   } else {
-    txt += 'A rota direta cruzaria terra — sem comparação.';
+    txt += 'A* (correntes)\n  ' + fmtKm(pathKm(routePath)) + '  ·  ' + fmtDur(res.hours);
   }
+  txt += '\n\nclique com o botão direito na linha da rota p/ análise detalhada';
   routeInfoEl.textContent = txt;
   drawRoute();
+  fetchRouteVariants(routeA, routeB);
+}
+
+// rota comercial (A* sem correntes entre os mesmos nós) + perfil de potência, no cliente
+function setClientComparison(s, gg, astarRes) {
+  routeVariants = null;
+  const comm = aStar(s[0], s[1], gg[0], gg[1], 0);
+  if (!comm || comm.path.length < 2) return null;
+  const cmp = buildRouteComparison(astarRes, comm);
+  routeVariants = prepareVariants(Object.assign({ key: routeVariantsKey(routeA, routeB), source: 'client' }, cmp));
+  return cmp;
 }
 
 function handleMapClick(px, py) {
+  if (emergencyMode) { handleEmergencyClick(px, py); return; }
   if (!routeMode) return;
-  const ll = invert(px, py);
-  if (ll[1] > 89 || ll[1] < -89) return;
-  const lon = ((ll[0] + 180) % 360 + 360) % 360 - 180;
+
+  /* modo normal: só aceita pontos válidos da lista de portos —
+     nada de clicar no meio do oceano pra virar origem/destino */
+  const port = findPortAt(px, py);
+  if (!port) {
+    routeInfoEl.textContent = (routeMode === 'A'
+      ? 'Selecione o porto de origem'
+      : 'Selecione o porto de destino') +
+      ' clicando sobre um marcador no mapa, ou use os menus "Origem"/"Destino" abaixo.';
+    return;
+  }
+
   lastRouteClick = performance.now();
+  routeIsEmergency = false;
   if (routeMode === 'A') {
-    routeA = [lon, ll[1]]; routeB = null; routePath = null;
+    routeA = [port.lon, port.lat]; routeAPort = port;
+    routeB = null; routeBPort = null; routePath = null;
     routeMode = 'B';
-    routeInfoEl.textContent = 'agora clique no destino (ponto B).';
+    routeInfoEl.textContent = 'Origem: ' + port.name + '. Agora clique no porto de destino.';
     drawRoute();
   } else {
-    routeB = [lon, ll[1]];
+    if (routeAPort && port.id === routeAPort.id) {
+      routeInfoEl.textContent = 'Escolha um porto de destino diferente da origem.';
+      return;
+    }
+    routeB = [port.lon, port.lat]; routeBPort = port;
     routeMode = null;
     flowCanvas.classList.remove('picking');
     computeRoute();
   }
+}
+
+/* ---------- Rota de Emergência: clique livre no oceano -> porto seguro mais próximo ---------- */
+function findNearestPorts(lon, lat, limit) {
+  const arr = PORTS.map((p) => ({ port: p, km: havKm(lon, lat, p.lon, p.lat) }));
+  arr.sort((a, b) => a.km - b.km);
+  return limit ? arr.slice(0, limit) : arr;
+}
+
+function setEmergencyMode(on) {
+  emergencyMode = on;
+  const btn = document.getElementById('r-emergency');
+  const alertEl = document.getElementById('emg-alert');
+  if (btn) { btn.classList.toggle('active', on); btn.setAttribute('aria-pressed', String(on)); }
+  flowCanvas.classList.toggle('emergency', on);
+
+  routeMode = null;
+  routeA = routeB = routePath = null;
+  routeAPort = routeBPort = null;
+  routeIsEmergency = false;
+  flowCanvas.classList.remove('picking');
+  routeInfoEl.textContent = '';
+  closeRouteAnalytics();
+  drawRoute();
+
+  if (!alertEl) return;
+  if (on) {
+    alertEl.hidden = false;
+    alertEl.textContent = '🚨 Modo de emergência ativo — clique em qualquer ponto do oceano para marcar a posição do navio em perigo.';
+  } else {
+    alertEl.hidden = true;
+  }
+}
+
+function handleEmergencyClick(px, py) {
+  const ll = invert(px, py);
+  if (ll[1] > 89 || ll[1] < -89) return;
+  const lon = ((ll[0] + 180) % 360 + 360) % 360 - 180;
+  const alertEl = document.getElementById('emg-alert');
+
+  if (isLandLL(lon, ll[1])) {
+    if (alertEl) alertEl.textContent = '🚨 Ponto em terra — clique dentro do oceano para marcar o navio em perigo.';
+    return;
+  }
+
+  routeA = [lon, ll[1]]; routeAPort = null;
+  routeB = null; routeBPort = null; routePath = null;
+  routeIsEmergency = true;
+  drawRoute();
+  if (alertEl) alertEl.textContent = '🚨 Calculando o porto seguro mais próximo…';
+  computeEmergencyRoute(lon, ll[1]);
+}
+
+function computeEmergencyRoute(lon, lat) {
+  const alertEl = document.getElementById('emg-alert');
+  routeVariants = null;
+  const s = navSnap(lon, lat);
+  if (!s || !NAV) {
+    if (alertEl) alertEl.textContent = '🚨 Ponto fora do oceano navegável — tente clicar em uma área de água.';
+    return;
+  }
+
+  const candidates = findNearestPorts(lon, lat, 6);
+  for (let i = 0; i < candidates.length; i++) {
+    const port = candidates[i].port;
+    const gg = navSnap(port.lon, port.lat);
+    if (!gg) continue;
+    const res = aStar(s[0], s[1], gg[0], gg[1]);
+    if (res && res.path.length > 1) {
+      routePath = smoothPath(res.path);
+      routeB = [port.lon, port.lat]; routeBPort = port;
+      routeIsEmergency = true;
+      const km = pathKm(routePath);
+      const hOpt = res.hours;
+      setClientComparison(s, gg, res); // só p/ a análise do botão direito — no mapa segue a linha vermelha
+      if (alertEl) {
+        alertEl.innerHTML =
+          '🚨 <strong>Rota de emergência traçada</strong><br>' +
+          'Porto seguro mais próximo: <strong>' + port.name + '</strong> (' + port.country + ')<br>' +
+          'Distância: ' + fmtNm(km) + ' · ' + fmtKm(km) + '<br>' +
+          'Tempo estimado: ' + fmtDur(hOpt) + ' a ' + SHIP.kn + ' nós<br>' +
+          '<em>clique com o botão direito na linha da rota p/ análise detalhada</em>';
+      }
+      drawRoute();
+      fetchRouteVariants(routeA, routeB);
+      return;
+    }
+  }
+
+  routePath = null;
+  routeB = null; routeBPort = null;
+  if (alertEl) alertEl.textContent = '🚨 Não foi possível traçar uma rota até um porto próximo a partir deste ponto.';
+  drawRoute();
 }
 
 /* ---------- desenho da rota (canvas próprio, por cima do fluxo) ---------- */
@@ -1442,8 +2408,8 @@ function strokeRoute(p) {
   rctx.stroke();
 }
 
-function drawRouteArrows(p) {
-  rctx.fillStyle = MAP.route;
+function drawRouteArrows(p, color) {
+  rctx.fillStyle = color || MAP.route;
   let acc = 0;
   for (let i = 1; i < p.length; i++) {
     const a = project(p[i - 1][0], p[i - 1][1]);
@@ -1481,22 +2447,563 @@ function drawPin(ll, color, label) {
   rctx.fillText(label, s[0], s[1]);
 }
 
+function drawEngineRoute(path, color, width, glow) {
+  if (!path || path.length < 2) return;
+  rctx.lineJoin = 'round';
+  rctx.lineCap = 'round';
+  rctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  rctx.lineWidth = width + 3;
+  strokeRoute(path);
+  if (glow) { rctx.shadowColor = color; rctx.shadowBlur = 12; }
+  rctx.strokeStyle = color;
+  rctx.lineWidth = width;
+  strokeRoute(path);
+  rctx.shadowBlur = 0;
+}
+
+function haveRouteVariants() {
+  return !routeIsEmergency && routeVariants && routeVariants.key === routeVariantsKey(routeA, routeB);
+}
+
+// cor da potência do motor: verde-néon (motor reduzido ao piso) -> ciano-néon (potência de serviço)
+function powerColor(v, vmin, vmax, alpha) {
+  const t = vmax - vmin > 0.01 ? Math.max(0, Math.min(1, (v - vmin) / (vmax - vmin))) : 1;
+  return 'rgba(' + Math.round(140 - 80 * t) + ',255,' + Math.round(80 + 140 * t) + ',' + alpha.toFixed(2) + ')';
+}
+
+// Copiloto IA: mesmo caminho do A*, colorido trecho a trecho pela potência escolhida
+function drawPowerRoute(ai, alpha, dashed) {
+  const p = ai.drawPath || ai.path;
+  if (!p || p.length < 2) return;
+  const sp = ai.speeds || [];
+  const kn = ai.service_kn || SHIP.kn, vmin = kn * MIN_SPEED_FRAC;
+  const nDraw = p.length - 1, nSeg = Math.max(1, sp.length);
+  const speedAt = (i) => (sp.length ? sp[Math.min(nSeg - 1, Math.floor(i * nSeg / nDraw))] : kn);
+
+  rctx.lineJoin = 'round';
+  rctx.lineCap = 'round';
+  if (!dashed) {
+    rctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    rctx.lineWidth = 6;
+    strokeRoute(p);
+  }
+  rctx.setLineDash(dashed ? [10, 7] : []);
+  rctx.lineWidth = 3;
+  rctx.shadowBlur = 10;
+  let i = 0;
+  while (i < nDraw) { // agrupa trechos seguidos de mesma potência num só stroke
+    const v = speedAt(i);
+    let j = i + 1;
+    while (j < nDraw && speedAt(j) === v) j++;
+    rctx.beginPath();
+    let prev = project(p[i][0], p[i][1]);
+    rctx.moveTo(prev[0], prev[1]);
+    for (let k = i + 1; k <= j; k++) {
+      const s = project(p[k][0], p[k][1]);
+      if (Math.abs(s[0] - prev[0]) > W * 0.5) rctx.moveTo(s[0], s[1]); else rctx.lineTo(s[0], s[1]);
+      prev = s;
+    }
+    const col = powerColor(v, vmin, kn, alpha);
+    rctx.strokeStyle = col;
+    rctx.shadowColor = col;
+    rctx.stroke();
+    i = j;
+  }
+  rctx.shadowBlur = 0;
+  rctx.setLineDash([]);
+}
+
 function drawRoute() {
   rctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   rctx.clearRect(0, 0, W, H);
-  if (routePath && routePath.length > 1) {
+
+  if (haveRouteVariants()) {
+    const v = routeVariants;
+    // 1. Rota comercial padrão — linha cinza tracejada (referência, sempre visível)
+    rctx.setLineDash([6, 5]);
+    rctx.lineJoin = 'round';
+    rctx.lineCap = 'round';
+    rctx.strokeStyle = 'rgba(190,198,208,0.85)';
+    rctx.lineWidth = 1.6;
+    strokeRoute(v.baseline.drawPath || v.baseline.path);
+    rctx.setLineDash([]);
+
+    // 2. A* (menor tempo com a matriz de correntes) — linha sólida azul metálico
+    if (routeDisplayMode === 'astar' || routeDisplayMode === 'both') {
+      drawEngineRoute(v.astar.drawPath || v.astar.path, '#4f7fc9', 2.6, false);
+    }
+    // 3. Copiloto IA — néon pulsante colorido pela potência; tracejado sobre o A* no modo "ambas"
+    if (routeDisplayMode === 'llm' || routeDisplayMode === 'both') {
+      drawPowerRoute(v.llm, 0.6 + 0.4 * Math.sin(pulsePhase), routeDisplayMode === 'both');
+    }
+  } else if (routePath && routePath.length > 1) {
+    const routeColor = routeIsEmergency ? '#ff3b30' : MAP.route;
     rctx.lineJoin = 'round';
     rctx.lineCap = 'round';
     rctx.strokeStyle = 'rgba(255,255,255,0.75)';
     rctx.lineWidth = 6;
     strokeRoute(routePath);
-    rctx.strokeStyle = MAP.route;
-    rctx.lineWidth = 2.5;
+    rctx.strokeStyle = routeColor;
+    rctx.lineWidth = routeIsEmergency ? 3 : 2.5;
     strokeRoute(routePath);
-    drawRouteArrows(routePath);
+    drawRouteArrows(routePath, routeColor);
   }
-  if (routeA) drawPin(routeA, '#4ade80', 'A');
-  if (routeB) drawPin(routeB, '#f87171', 'B');
+
+  if (routeA) drawPin(routeA, routeIsEmergency ? '#ff3b30' : '#4ade80', routeIsEmergency ? '!' : 'A');
+  if (routeB) drawPin(routeB, routeIsEmergency ? '#22c55e' : '#f87171', routeIsEmergency ? 'P' : 'B');
+}
+
+setInterval(() => {
+  if (haveRouteVariants() && (routeDisplayMode === 'llm' || routeDisplayMode === 'both')) {
+    pulsePhase += 0.18;
+    drawRoute();
+  }
+}, 120);
+
+/* ---------- análise da rota (clique com botão direito na linha) ---------- */
+const FUEL_REF_TPD = 180;    // t/dia de referência a 20 nós (porta-contêineres médio)
+const FUEL_REF_KN = 20;
+const FUEL_PRICE_USD = 600;  // US$/t de VLSFO — estimativa de mercado
+const CO2_PER_TON_FUEL = 3.114; // fator de emissão (IMO) p/ combustível fóssil marítimo
+
+function fuelTonsPerHour(kn) {
+  return (FUEL_REF_TPD / 24) * Math.pow(kn / FUEL_REF_KN, 3);
+}
+
+function distToSegment(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 > 0 ? ((px - x1) * dx + (py - y1) * dy) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
+function isPointNearPath(px, py, tol, path) {
+  if (!path || path.length < 2) return false;
+  let prev = null;
+  for (let i = 0; i < path.length; i++) {
+    const s = project(path[i][0], path[i][1]);
+    if (prev && Math.abs(s[0] - prev[0]) <= W * 0.5) {
+      if (distToSegment(px, py, prev[0], prev[1], s[0], s[1]) <= tol) return true;
+    }
+    prev = s;
+  }
+  return false;
+}
+
+function isPointNearRoute(px, py, tol) {
+  if (haveRouteVariants()) {
+    const v = routeVariants;
+    return ['baseline', 'astar', 'llm'].some((k) => v[k] && isPointNearPath(px, py, tol, v[k].drawPath || v[k].path));
+  }
+  return isPointNearPath(px, py, tol, routePath);
+}
+
+function setRaCell(row, idx, text) {
+  const el = document.getElementById('ra3-' + row + '-' + idx);
+  if (el) el.textContent = text;
+}
+
+// colunas 2 e 3 comparadas com a rota comercial padrão (coluna 1)
+function fillRaColumn(idx, m, base) {
+  if (!m || !isFinite(m.hours)) {
+    ['speed', 'dist', 'time', 'fuel', 'co2', 'cost'].forEach((row) => setRaCell(row, idx, '—'));
+    return;
+  }
+  const kn = m.service_kn || SHIP.kn;
+  const fuel = (m.fuel_tons != null && isFinite(m.fuel_tons)) ? m.fuel_tons : fuelTonsPerHour(kn) * m.hours;
+  setRaCell('speed', idx, m.speeds
+    ? nf1(m.min_kn) + '–' + nf1(m.max_kn) + ' nós · média ' + nf1(m.avg_kn) + ' (carga ' + Math.round(m.load_pct) + '%)'
+    : nf1(kn) + ' nós constantes (carga 100%)');
+  setRaCell('dist', idx, fmtNm(m.km) + ' · ' + fmtKm(m.km));
+  setRaCell('time', idx, fmtDur(m.hours) +
+    (base && isFinite(base.hours) ? ' (' + (m.hours <= base.hours ? '−' : '+') + nf1(Math.abs(m.hours - base.hours)) + ' h)' : ''));
+
+  if (idx === 0 || !base) {
+    setRaCell('fuel', idx, nf1(fuel) + ' t VLSFO');
+    setRaCell('co2', idx, nf1(fuel * CO2_PER_TON_FUEL) + ' t emitidas (ref.)');
+    setRaCell('cost', idx, 'US$ ' + Math.round(fuel * FUEL_PRICE_USD).toLocaleString('pt-BR') + ' (ref.)');
+    return;
+  }
+  const baseFuel = base.fuel_tons;
+  const saved = Math.max(0, baseFuel - fuel);
+  const pct = baseFuel > 0 ? (saved / baseFuel) * 100 : 0;
+  setRaCell('fuel', idx, nf1(fuel) + ' t (−' + nf1(pct) + '%)');
+  setRaCell('co2', idx, nf1(saved * CO2_PER_TON_FUEL) + ' t evitadas');
+  setRaCell('cost', idx, 'US$ ' + Math.round(saved * FUEL_PRICE_USD).toLocaleString('pt-BR'));
+}
+
+function bearingDeg(lo1, la1, lo2, la2) {
+  const p1 = la1 * Math.PI / 180, p2 = la2 * Math.PI / 180;
+  const dl = (lo2 - lo1) * Math.PI / 180;
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+function openRouteAnalytics() {
+  const modal = document.getElementById('route-analytics');
+  if (!modal || !routeA || !routeB) return;
+  const v = (routeVariants && routeVariants.key === routeVariantsKey(routeA, routeB)) ? routeVariants : null;
+
+  fillRaColumn(0, v && v.baseline, null);
+  fillRaColumn(1, v && v.astar, v && v.baseline);
+  fillRaColumn(2, v && v.llm, v && v.baseline);
+
+  const subtitle = routeAPort && routeBPort
+    ? routeAPort.name + ' → ' + routeBPort.name
+    : (routeIsEmergency && routeBPort ? 'Posição de emergência → ' + routeBPort.name : null);
+  document.getElementById('ra-subtitle').textContent =
+    (subtitle || (fmtCoord(routeA[1], routeA[0]) + ' → ' + fmtCoord(routeB[1], routeB[0]))) +
+    ' · ' + nf1(SHIP.kn) + ' nós de serviço';
+
+  document.getElementById('ra-rationale').textContent = v && v.llm && v.llm.rationale
+    ? '🧭 ' + v.llm.rationale
+    : '🧭 Não foi possível comparar as abordagens para este trajeto.';
+
+  modal.hidden = false;
+}
+
+function closeRouteAnalytics() {
+  const modal = document.getElementById('route-analytics');
+  if (modal) modal.hidden = true;
+}
+
+function bindRouteAnalytics() {
+  const modal = document.getElementById('route-analytics');
+  if (!modal) return;
+
+  flowCanvas.addEventListener('contextmenu', (e) => {
+    const r = flowCanvas.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    if (isPointNearRoute(mx, my, 8)) {
+      e.preventDefault();
+      openRouteAnalytics();
+    }
+  });
+
+  document.getElementById('ra-close').addEventListener('click', closeRouteAnalytics);
+  modal.querySelector('.ra-backdrop').addEventListener('click', closeRouteAnalytics);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !modal.hidden) closeRouteAnalytics();
+  });
+}
+
+/* ---------- Previsões IA: aciona as ferramentas do Copiloto (sem chat) ---------- */
+function aiCurrentPoint() {
+  if (lastHoverLL) return { lon: lastHoverLL[0], lat: lastHoverLL[1] };
+  const c = invert(W / 2, H / 2);
+  return { lon: c[0], lat: c[1] };
+}
+
+const nf1 = (v) => v.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const COMPASS_PT = ['N', 'NE', 'L', 'SE', 'S', 'SO', 'O', 'NO'];
+function compassPt(deg) { return COMPASS_PT[Math.floor(((deg + 22.5) % 360) / 45)]; }
+function normLon(lon) { return ((lon + 180) % 360 + 360) % 360 - 180; }
+
+function updateDriftMetrics() {
+  const box = document.getElementById('ai-drift-metrics');
+  if (!box) return;
+  if (!oilSpill || oilSpill.drift_hours == null) { box.hidden = true; return; }
+  box.hidden = false;
+  const s = oilSpill;
+  const set = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+  set('ai-drift-time', s.drift_hours + ' horas no mar (' + nf1(s.drift_hours / 24) + ' dias)');
+  set('ai-drift-dist', nf1(s.drift_nm) + ' NM');
+  set('ai-drift-speed', nf1(s.drift_speed_kn) + ' nós');
+
+  // campos extras só existem na simulação local (a resposta antiga do servidor não os traz)
+  const local = s.dx_km != null;
+  box.querySelectorAll('[data-opt]').forEach((el) => { el.hidden = !local; });
+  if (local) {
+    set('ai-drift-xy',
+      'X ' + nf1(Math.abs(s.dx_km)) + ' km ' + (s.dx_km >= 0 ? 'L' : 'O') +
+      ' · Y ' + nf1(Math.abs(s.dy_km)) + ' km ' + (s.dy_km >= 0 ? 'N' : 'S') +
+      (s.drift_compass ? ' (rumo ' + s.drift_compass + ')' : ''));
+    const r = s.frames[s.frames.length - 1].radius_km;
+    set('ai-drift-radius', nf1(r) + ' km (~' + Math.round(Math.PI * r * r).toLocaleString('pt-BR') + ' km²)');
+    set('ai-drift-origin',
+      (s.routeLabel ? s.routeLabel + (s.incident_frac != null ? ' · ' + Math.round(s.incident_frac * 100) + '%' : '') + ' — ' : '') +
+      fmtCoord(s.origin.lat, s.origin.lon));
+    set('ai-drift-ship', fmtCoord(s.final.lat, s.final.lon));
+  }
+  const ag = document.getElementById('ai-drift-aground');
+  if (ag) {
+    ag.hidden = !s.aground;
+    if (s.aground) ag.textContent = '⚠️ Atingiu a costa após ' + s.grounded_hour + ' h de deriva — risco de contaminação do litoral.';
+  }
+}
+
+/* ---------- Simulação de Vazamento & Deriva (calculada no navegador) ----------
+   Usa o MESMO campo de correntes que anima as partículas (sampleField), então
+   funciona sem o servidor Python e responde na hora a cada ajuste do formulário. */
+let spillActive = false;
+let spillCursorOrigin = null; // ponto livre fixado no clique, pra ajustes ao vivo não "seguirem" o mouse
+const spillRouteCache = new Map();
+
+function spillShipRoute(choice) {
+  if (choice === 'current') {
+    if (!routePath || routePath.length < 2) {
+      return { error: 'Trace uma rota em "Navegação" primeiro — ou escolha uma das rotas pré-definidas.' };
+    }
+    const label = routeAPort && routeBPort ? routeAPort.name + ' → ' + routeBPort.name
+      : (routeIsEmergency ? 'Rota de emergência' : 'Rota atual');
+    return { path: routePath, label };
+  }
+  if (spillRouteCache.has(choice)) return spillRouteCache.get(choice);
+
+  const [ia, ib] = choice.split('|');
+  const pa = PORT_BY_ID.get(ia), pb = PORT_BY_ID.get(ib);
+  if (!pa || !pb) return { error: 'Porto não encontrado na base de portos.' };
+  const sA = navSnap(pa.lon, pa.lat), sB = navSnap(pb.lon, pb.lat);
+  if (!sA || !sB) return { error: 'Esta rota está fora da área navegável dos dados carregados.' };
+  const res = aStar(sA[0], sA[1], sB[0], sB[1]);
+  if (!res || res.path.length < 2) {
+    return { error: 'Não encontrei trajeto marítimo entre ' + pa.name + ' e ' + pb.name + ' com os dados atuais.' };
+  }
+  const out = { path: smoothPath(res.path), label: pa.name + ' → ' + pb.name };
+  spillRouteCache.set(choice, out);
+  return out;
+}
+
+function pointAlongPath(path, frac) {
+  const seg = [];
+  let total = 0;
+  for (let i = 1; i < path.length; i++) {
+    const d = havKm(path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]);
+    seg.push(d);
+    total += d;
+  }
+  let target = total * Math.max(0, Math.min(1, frac));
+  for (let i = 1; i < path.length; i++) {
+    const d = seg[i - 1];
+    if (target <= d || i === path.length - 1) {
+      const t = d > 0 ? Math.min(1, target / d) : 0;
+      const a = path[i - 1], b = path[i];
+      return [normLon(a[0] + (b[0] - a[0]) * t), a[1] + (b[1] - a[1]) * t];
+    }
+    target -= d;
+  }
+  return [normLon(path[0][0]), path[0][1]];
+}
+
+function toWater(lon, lat) {
+  if (!isLandLL(lon, lat)) return [lon, lat];
+  const s = navSnap(lon, lat);
+  return s ? [navLon(s[1]), navLat(s[0])] : null;
+}
+
+function simulateDrift(lon0, lat0, hours, volume) {
+  const S = OD ? 3.6 : 2.0; // mesma conversão do edgeHours: m/s -> km/h (campo sintético: 2,0)
+  const SUB = 4;            // 4 passos de 15 min por hora — segue melhor as curvas das correntes
+  const r0 = 0.15 * Math.sqrt(Math.max(1, volume));
+  const spread = 2.17 * Math.pow(Math.max(1, volume) / 500, 0.25); // espalhamento tipo Fay: maior volume, mancha maior
+  let lon = lon0, lat = lat0, driftKm = 0, aground = false, groundedHour = null;
+  const frames = [];
+
+  for (let h = 1; h <= hours; h++) {
+    for (let k = 0; k < SUB && !aground; k++) {
+      const f = sampleField(lon, lat);
+      const nlat = lat + (f[1] * S / SUB) / 110.57;
+      const nlon = normLon(lon + (f[0] * S / SUB) / (111.32 * Math.max(0.05, Math.cos(lat * Math.PI / 180))));
+      if (Math.abs(nlat) > 84 || isLandLL(nlon, nlat)) { aground = true; groundedHour = h; break; }
+      driftKm += havKm(lon, lat, nlon, nlat);
+      lon = nlon;
+      lat = nlat;
+    }
+    frames.push({ hour: h, lat, lon, radius_km: r0 + spread * Math.pow(h, 0.75) });
+  }
+
+  const midLat = (lat0 + lat) / 2;
+  const dxKm = (((lon - lon0 + 540) % 360) - 180) * 111.32 * Math.cos(midLat * Math.PI / 180);
+  const dyKm = (lat - lat0) * 110.57;
+  const driftNm = driftKm * 0.539957;
+  const speedKn = driftNm / hours;
+  const compass = driftKm > 0.05 ? compassPt(bearingDeg(lon0, lat0, lon, lat)) : null;
+
+  let explanation = compass
+    ? 'Conclusão da IA: Modelo de advecção-difusão impulsionado por correntes de superfície (direção '
+      + compass + ' a ' + nf1(speedKn) + ' nós). O navio derivou ' + nf1(driftNm) + ' NM ao longo de '
+      + hours + ' horas.'
+    : 'Conclusão da IA: Modelo de advecção-difusão impulsionado por correntes de superfície — correntes '
+      + 'fracas no ponto, deriva de apenas ' + nf1(driftNm) + ' NM em ' + hours + ' horas.';
+  if (aground) explanation += ' A mancha atingiu a costa após ' + groundedHour + ' h.';
+
+  return {
+    origin: { lat: lat0, lon: lon0 },
+    final: { lat, lon },
+    volume_ton: volume,
+    frames,
+    title: 'SIMULAÇÃO DE DERIVA & VAZAMENTO',
+    explanation,
+    drift_hours: hours,
+    drift_km: driftKm,
+    drift_nm: driftNm,
+    drift_speed_kn: speedKn,
+    drift_compass: compass,
+    dx_km: dxKm,
+    dy_km: dyKm,
+    aground,
+    grounded_hour: groundedHour,
+  };
+}
+
+// zoomIn=false (ajustes ao vivo): só recentraliza se o evento saiu da tela, sem mexer no zoom
+function focusOnSpill(sim, zoomIn) {
+  const o = sim.origin, f = sim.final;
+  const dLon = ((f.lon - o.lon + 540) % 360) - 180; // funciona mesmo cruzando 180°
+  const cLon = normLon(o.lon + dLon / 2), cLat = (o.lat + f.lat) / 2;
+  if (!zoomIn) {
+    const a = project(normLon(o.lon), o.lat), b = project(normLon(f.lon), f.lat);
+    const inView = (p) => p[0] > 40 && p[0] < W - 40 && p[1] > 40 && p[1] < H - 40;
+    if (inView(a) && inView(b)) return;
+  } else {
+    const rKm = sim.frames[sim.frames.length - 1].radius_km;
+    const spanX = Math.abs(dLon) + 2 * rKm / (111 * Math.max(0.2, Math.cos(cLat * Math.PI / 180)));
+    const spanY = Math.abs(f.lat - o.lat) + 2 * rKm / 111;
+    const fitK = Math.min(0.45 * W / Math.max(spanX, 0.05), 0.45 * H / Math.max(spanY, 0.05));
+    const nz = Math.min((OD && OD.regional) ? 120 : 16, fitK / baseK);
+    if (nz > Z) { Z = nz; scaleK = Z * baseK; }
+  }
+  originX = W / 2 - (cLon + 180) * scaleK;
+  originY = H / 2 - (90 - cLat) * scaleK;
+  clampView();
+  updateProj();
+  fctx.clearRect(0, 0, W, H);
+}
+
+function readSpillForm() {
+  let hours = Math.round(+document.getElementById('spill-hours').value);
+  if (!isFinite(hours) || hours < 1) hours = 18;
+  hours = Math.min(240, hours);
+  let volume = +document.getElementById('spill-volume').value;
+  if (!isFinite(volume) || volume <= 0) volume = 500;
+  return {
+    choice: document.getElementById('spill-route').value,
+    frac: +document.getElementById('spill-pos').value / 100,
+    hours,
+    volume,
+  };
+}
+
+function runSpillSimulation(live) {
+  const statusEl = document.getElementById('ai-status');
+  const say = (t) => { if (statusEl) statusEl.textContent = t; };
+  if (!NAV) { say('O mapa ainda está carregando — tente de novo em instantes.'); return; }
+
+  const form = readSpillForm();
+  let origin, shipRoute = null, label, frac = null;
+  if (form.choice === 'cursor') {
+    if (!live || !spillCursorOrigin) {
+      const p = aiCurrentPoint();
+      spillCursorOrigin = [normLon(p.lon), p.lat];
+    }
+    origin = spillCursorOrigin;
+    label = 'Ponto livre';
+  } else {
+    const r = spillShipRoute(form.choice);
+    if (r.error) { say(r.error); return; }
+    shipRoute = r.path;
+    label = r.label;
+    frac = form.frac;
+    origin = pointAlongPath(r.path, frac);
+  }
+  origin = toWater(origin[0], origin[1]);
+  if (!origin) { say('O ponto escolhido não está em água navegável.'); return; }
+
+  const sim = simulateDrift(origin[0], origin[1], form.hours, form.volume);
+  sim.shipRoute = shipRoute;
+  sim.routeLabel = label;
+  sim.incident_frac = frac;
+  oilSpill = sim;
+  spillActive = true;
+  updateDriftMetrics();
+
+  say('🚨 Incidente em ' + label + (frac != null ? ' (' + Math.round(frac * 100) + '% do trajeto)' : '') +
+      ': deriva de ' + nf1(sim.drift_nm) + ' NM em ' + form.hours + ' h' +
+      (sim.aground ? ' — atingiu a costa.' : '.'));
+
+  focusOnSpill(sim, !live); // no clique: centraliza e aproxima o suficiente p/ ler a deriva
+  drawBase();
+  drawRoute();
+}
+
+async function aiToolRequest(message, statusPrefix) {
+  const statusEl = document.getElementById('ai-status');
+  if (statusEl) statusEl.textContent = statusPrefix || 'consultando o Copiloto IA…';
+
+  const point = aiCurrentPoint();
+  let data;
+  try {
+    if (location.protocol === 'file:') throw new Error('sem servidor local');
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, context: point }),
+    });
+    data = await res.json();
+  } catch (e) {
+    data = {
+      reply: 'Não consegui falar com o servidor local. Rode "python servidor.py" para ativar as Previsões IA '
+           + '(simulação de vazamento e previsão de cardumes).',
+      tool: null, data: null,
+    };
+  }
+
+  if (statusEl) statusEl.textContent = data.reply || '';
+
+  if (data.tool === 'simular_vazamento' && data.data) {
+    oilSpill = data.data;
+    spillActive = false;
+    updateDriftMetrics();
+    drawBase();
+  } else if (data.tool === 'prever_cardumes' && data.data) {
+    fishHotspots = data.data;
+    drawBase();
+  }
+}
+
+function bindAiPredictions() {
+  const fishBtn = document.getElementById('ai-fish');
+  const clearBtn = document.getElementById('ai-clear');
+  const runBtn = document.getElementById('spill-run');
+  const routeSel = document.getElementById('spill-route');
+  const pos = document.getElementById('spill-pos');
+  const posVal = document.getElementById('spill-pos-val');
+  const posWrap = document.getElementById('spill-pos-wrap');
+  if (!fishBtn || !clearBtn || !runBtn || !routeSel || !pos) return;
+
+  fishBtn.addEventListener('click', () => aiToolRequest('Prever zonas de cardumes na costa', '🐟 procurando frentes de convergência…'));
+  clearBtn.addEventListener('click', () => {
+    oilSpill = null;
+    fishHotspots = null;
+    spillActive = false;
+    spillCursorOrigin = null;
+    hideSimTooltip();
+    updateDriftMetrics();
+    const statusEl = document.getElementById('ai-status');
+    if (statusEl) statusEl.textContent = '';
+    drawBase();
+  });
+
+  runBtn.addEventListener('click', () => runSpillSimulation(false));
+
+  // depois da 1ª simulação, qualquer ajuste recalcula na hora (no máximo 1x por quadro)
+  let pending = false;
+  const live = () => {
+    if (!spillActive || pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; runSpillSimulation(true); });
+  };
+  const syncPos = () => {
+    if (posVal) posVal.textContent = pos.value + '%';
+    if (posWrap) posWrap.hidden = routeSel.value === 'cursor';
+  };
+  pos.addEventListener('input', () => { syncPos(); live(); });
+  routeSel.addEventListener('change', () => { syncPos(); live(); });
+  document.getElementById('spill-hours').addEventListener('input', live);
+  document.getElementById('spill-volume').addEventListener('input', live);
+  syncPos();
 }
 
 /* ---------- legenda ---------- */
@@ -1520,9 +3027,11 @@ function updateLegend() {
   const sw = document.querySelector('#lg-currents .lg-swatches');
   const sst = document.getElementById('lg-sst');
   const nav = document.getElementById('lg-nav');
+  const ports = document.getElementById('lg-ports');
   if (sw) sw.hidden = showSST;
   if (sst) sst.hidden = !showSST;
   if (nav) nav.hidden = !showNavRoutes;
+  if (ports) ports.hidden = !showPorts;
 }
 
 /* ---------- botão "Atualizar correntes" (precisa do servidor local) ---------- */
@@ -1647,12 +3156,62 @@ function bindPanelToggle() {
   mq.addEventListener('change', (e) => setCollapsed(e.matches));
 }
 
+/* ---------- botão ☰: painel lateral retrátil (slide-in / slide-out) ----------
+   Ao ocultar, o mapa passa a 100% da largura logo no início (um único resize) e o
+   painel desliza por cima pra fora; ao mostrar, ele desliza de volta por cima do mapa
+   e só no fim da animação volta a ocupar sua coluna. Assim o canvas nunca é esticado
+   nem realocado a cada quadro da animação. */
+function bindMenuToggle() {
+  const app = document.getElementById('app');
+  const panel = document.getElementById('panel');
+  const stage = document.getElementById('stage');
+  const btn = document.getElementById('menu-toggle');
+  if (!app || !panel || !stage || !btn) return;
+
+  let token = 0;
+  const relayout = (mutate) => {
+    const before = stage.getBoundingClientRect().left;
+    mutate();
+    const r = stage.getBoundingClientRect();
+    if (Math.abs(r.left - before) > 0.5 || Math.round(r.width) !== W) resize(before - r.left);
+  };
+
+  const setHidden = (hide) => {
+    const my = ++token;
+    btn.setAttribute('aria-expanded', String(!hide));
+    if (hide) {
+      relayout(() => app.classList.add('panel-overlay'));
+      void panel.offsetWidth; // a transição parte da posição visível
+      app.classList.add('panel-hidden');
+      return;
+    }
+    app.classList.add('panel-overlay');
+    void panel.offsetWidth;
+    app.classList.remove('panel-hidden');
+
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      panel.removeEventListener('transitionend', onEnd);
+      if (my !== token) return; // clicaram de novo no meio da animação
+      relayout(() => app.classList.remove('panel-overlay'));
+    };
+    const onEnd = (e) => { if (e.target === panel && e.propertyName === 'transform') finish(); };
+    panel.addEventListener('transitionend', onEnd);
+    setTimeout(finish, 380); // sem transição (prefers-reduced-motion) o transitionend não dispara
+  };
+
+  btn.addEventListener('click', () => setHidden(!app.classList.contains('panel-hidden')));
+}
+
 /* ---------- controles ---------- */
 function bindControls() {
   showSST = document.getElementById('t-sst').checked;
   showCurr = document.getElementById('t-curr').checked;
   showGrat = document.getElementById('t-grat').checked;
   showNavRoutes = document.getElementById('t-navroutes').checked;
+  showPorts = document.getElementById('t-ports').checked;
 
   document.getElementById('t-sst').addEventListener('change', (e) => { showSST = e.target.checked; updateLegend(); drawBase(); drawRoute(); });
   document.getElementById('t-grat').addEventListener('change', (e) => { showGrat = e.target.checked; drawBase(); });
@@ -1663,32 +3222,72 @@ function bindControls() {
     seedParticles();
   });
   document.getElementById('t-navroutes').addEventListener('change', (e) => { showNavRoutes = e.target.checked; updateLegend(); drawBase(); });
+  document.getElementById('t-ports').addEventListener('change', (e) => {
+    showPorts = e.target.checked;
+    if (!showPorts) { hoveredPort = null; portTooltipEl.hidden = true; }
+    updateLegend();
+    drawBase();
+  });
   document.getElementById('z-in').addEventListener('click', () => setZoom(Z * 1.5, W / 2, H / 2));
   document.getElementById('z-out').addEventListener('click', () => setZoom(Z / 1.5, W / 2, H / 2));
   document.getElementById('z-reset').addEventListener('click', resetView);
 
   routeInfoEl = document.getElementById('r-info');
+  populatePortSelectors();
+
   document.getElementById('r-pick').addEventListener('click', () => {
+    if (emergencyMode) setEmergencyMode(false);
     routeMode = 'A'; routeA = routeB = routePath = null;
-    routeInfoEl.textContent = 'clique no ponto de partida (ponto A).';
+    routeAPort = routeBPort = null;
+    routeIsEmergency = false;
+    closeRouteAnalytics();
+    if (!showPorts) {
+      showPorts = true;
+      document.getElementById('t-ports').checked = true;
+      updateLegend();
+    }
+    document.getElementById('r-origin').value = '';
+    document.getElementById('r-dest').value = '';
+    routeInfoEl.textContent = 'Clique em um porto de origem (marcador no mapa) ou use o menu "Origem" abaixo.';
     flowCanvas.classList.add('picking');
     drawRoute();
+    drawBase();
   });
   document.getElementById('r-clear').addEventListener('click', () => {
     routeMode = null; routeA = routeB = routePath = null;
+    routeAPort = routeBPort = null;
+    routeIsEmergency = false;
     routeInfoEl.textContent = '';
     flowCanvas.classList.remove('picking');
+    document.getElementById('r-origin').value = '';
+    document.getElementById('r-dest').value = '';
+    const alertEl = document.getElementById('emg-alert');
+    if (alertEl) alertEl.hidden = true;
+    closeRouteAnalytics();
     drawRoute();
   });
+  document.getElementById('r-origin').addEventListener('change', routeFromSelectors);
+  document.getElementById('r-dest').addEventListener('change', routeFromSelectors);
+  document.getElementById('r-emergency').addEventListener('click', () => setEmergencyMode(!emergencyMode));
   document.getElementById('r-speed').addEventListener('input', (e) => {
     SHIP.kn = +e.target.value;
     document.getElementById('r-kn').textContent = e.target.value;
-    if (routeA && routeB && !routeMode) computeRoute();
+    if (!routeA || !routeB || routeMode) return;
+    if (routeIsEmergency) computeEmergencyRoute(routeA[0], routeA[1]);
+    else computeRoute();
+  });
+  document.querySelectorAll('input[name="r-algo"]').forEach((el) => {
+    el.addEventListener('change', (e) => {
+      if (e.target.checked) { routeDisplayMode = e.target.value; drawRoute(); }
+    });
   });
 
   bindUpdateButton();
   bindPanelToggle();
+  bindMenuToggle();
   bindThemeToggle();
+  bindRouteAnalytics();
+  bindAiPredictions();
 
   let drag = null, touch = null, wheelEnd = null;
 
@@ -1784,8 +3383,48 @@ function bindControls() {
   flowCanvas.addEventListener('mousemove', (ev) => {
     if (drag || touch) return;
     const r = flowCanvas.getBoundingClientRect();
-    const ll = invert(ev.clientX - r.left, ev.clientY - r.top);
+    const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+
+    if (showPorts) {
+      const p = findPortAt(mx, my);
+      if (p !== hoveredPort) {
+        hoveredPort = p;
+        flowCanvas.classList.toggle('port-hover', !!p);
+      }
+      if (p) {
+        portTooltipEl.innerHTML =
+          '<span class="pt-name">' + p.name + '</span>' +
+          '<span class="pt-meta">' + p.country + ' · ' + p.type + '</span>' +
+          '<span class="pt-meta">' + fmtCoord(p.lat, p.lon) + '</span>' +
+          '<span class="pt-size">' + p.size + '</span>';
+        portTooltipEl.style.left = mx + 'px';
+        portTooltipEl.style.top = my + 'px';
+        portTooltipEl.hidden = false;
+      } else {
+        portTooltipEl.hidden = true;
+      }
+    } else if (hoveredPort) {
+      hoveredPort = null;
+      portTooltipEl.hidden = true;
+    }
+
+    if (!hoveredPort) {
+      const fish = findFishHotspotAt(mx, my);
+      const oil = !fish ? findOilHoverAt(mx, my) : null;
+      if (fish) {
+        showSimTooltip(mx, my, 'fish', fish.title || 'ZONA DE ALTA PRODUTIVIDADE BIOLÓGICA', fish.explanation || '');
+      } else if (oil) {
+        showSimTooltip(mx, my, 'oil', oil.title || 'SIMULAÇÃO DE VAZAMENTO & DERIVA', oil.explanation || '');
+      } else {
+        hideSimTooltip();
+      }
+    } else {
+      hideSimTooltip();
+    }
+
+    const ll = invert(mx, my);
     if (ll[1] > 90 || ll[1] < -90) { readoutEl.textContent = ''; return; }
+    lastHoverLL = [((ll[0] + 180) % 360 + 360) % 360 - 180, ll[1]];
     const lon = ((ll[0] + 180) % 360 + 360) % 360 - 180;
     const cv = sampleField(lon, ll[1]);
     const sp = Math.hypot(cv[0], cv[1]);
@@ -1806,7 +3445,13 @@ function bindControls() {
       Math.abs(ll[1]).toFixed(1) + '°' + NS + '  ' +
       Math.abs(lon).toFixed(1) + '°' + EW + '   ·   ' + extra;
   });
-  flowCanvas.addEventListener('mouseleave', () => { readoutEl.textContent = ''; });
+  flowCanvas.addEventListener('mouseleave', () => {
+    readoutEl.textContent = '';
+    hoveredPort = null;
+    portTooltipEl.hidden = true;
+    flowCanvas.classList.remove('port-hover');
+    hideSimTooltip();
+  });
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
@@ -1848,12 +3493,15 @@ async function init() {
   readoutEl.textContent = 'preparando o mapa…';
   [land, countries] = await Promise.all([loadLand(), loadCountries()]);
   if (!land) warnEl.hidden = false;
-  iceCaps = extractPolar(land, -60);
   if (countries) {
     countries.features.forEach((f) => { f.__b = d3.geoBounds(f); });
     majorCountries = countries.features
       .filter((f) => f.properties.r <= MAX_LABEL_RANK)
       .sort((a, b) => a.properties.r - b.properties.r);
+    polarTerritories = {
+      type: 'FeatureCollection',
+      features: countries.features.filter((f) => POLAR_TERRITORY_NAMES.has(f.properties.n)),
+    };
     buildBordersTexture();
   }
 
@@ -1861,6 +3509,7 @@ async function init() {
 
   prepCurrents();
   buildLandMask();
+  buildSatelliteTextures();
   buildNav();
   if (!OD) buildField();
   computeNavRoutes();
