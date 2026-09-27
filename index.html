@@ -16,6 +16,7 @@
 </head>
 <body>
   <div id="app">
+    <button id="menu-toggle" type="button" aria-label="Mostrar/ocultar painel lateral" aria-controls="panel" aria-expanded="true" title="Mostrar/ocultar painel">☰</button>
     <aside id="panel">
       <div id="panel-head">
         <div class="brand-mini">
@@ -66,6 +67,11 @@
           <svg class="lbl-ic" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><path d="M12 7v14M4 12a8 8 0 0 0 16 0"/></svg>
           <span>Rotas de navegação</span>
         </label>
+        <label>
+          <input type="checkbox" id="t-ports" />
+          <svg class="lbl-ic" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6.5-5.9-6.5-11A6.5 6.5 0 0 1 18.5 10c0 5.1-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.2"/></svg>
+          <span>Portos de Desembarque</span>
+        </label>
         <label class="rng" id="day-wrap" hidden>Dia dos dados
           <select id="t-day"></select>
         </label>
@@ -84,14 +90,97 @@
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15 9l-2 6-6 2 2-6 6-2z"/></svg>
           Navegação
         </div>
+        <div class="hint">a rota só pode começar/terminar em um porto cadastrado — clique num marcador ou escolha nos menus abaixo</div>
         <div class="row">
           <button id="r-pick">Traçar rota</button>
           <button id="r-clear">Limpar</button>
         </div>
+        <label class="rng">Origem
+          <select id="r-origin"><option value="">— selecione um porto —</option></select>
+        </label>
+        <label class="rng">Destino
+          <select id="r-dest"><option value="">— selecione um porto —</option></select>
+        </label>
         <label class="rng">Velocidade do navio: <b id="r-kn">18</b> nós
           <input type="range" id="r-speed" min="6" max="40" value="18" />
         </label>
         <div id="r-info" class="rinfo"></div>
+
+        <button id="r-emergency" class="btn-emergency" type="button" aria-pressed="false">🚨 Rota de Emergência</button>
+        <div id="emg-alert" hidden></div>
+
+        <div class="grp-h">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a5 5 0 0 1 5 5c0 2-1 3-2 4l-1 1v2H10v-2l-1-1c-1-1-2-2-2-4a5 5 0 0 1 5-5z"/><path d="M10 18h4M9 21h6"/></svg>
+          Copiloto IA — Algoritmo de Rota
+        </div>
+        <div class="algo-select" role="radiogroup" aria-label="Algoritmo de rota exibido no mapa">
+          <label class="algo-chip">
+            <input type="radio" name="r-algo" id="r-algo-astar" value="astar" checked />
+            <span>A* (menor tempo c/ correntes)</span>
+          </label>
+          <label class="algo-chip">
+            <input type="radio" name="r-algo" id="r-algo-llm" value="llm" />
+            <span>Copiloto IA (potência / combustível)</span>
+          </label>
+          <label class="algo-chip">
+            <input type="radio" name="r-algo" id="r-algo-both" value="both" />
+            <span>Exibir ambas</span>
+          </label>
+        </div>
+        <div class="hint">cinza tracejado = rota comercial · azul = A* · néon = Copiloto IA (ciano = potência de serviço, verde = motor reduzido). Clique com o botão direito na linha p/ comparar as 3 abordagens.</div>
+
+        <div class="grp-h">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+          🔮 Previsões IA
+        </div>
+        <div class="hint">Cardume usa o ponto sob o cursor (passe o mouse sobre a área desejada e clique no botão)</div>
+        <div class="row">
+          <button id="ai-fish" title="Prever zonas de cardumes perto do cursor">🐟 Cardume</button>
+          <button id="ai-clear" title="Limpar as camadas de simulação">🧹 Limpar</button>
+        </div>
+        <div id="ai-status" class="rinfo"></div>
+
+        <div class="spill-box">
+          <div class="spill-title">🛢️ Simulação de Vazamento &amp; Deriva</div>
+          <label class="rng">Rota do navio (onde ocorreu o incidente)
+            <select id="spill-route">
+              <option value="santos|nynj">Santos → Nova York</option>
+              <option value="antwerp|montreal">Antuérpia → Montreal</option>
+              <option value="santos|rotterdam">Santos → Roterdã</option>
+              <option value="miami|lisbon">Miami → Lisboa</option>
+              <option value="rotterdam|houston">Roterdã → Houston</option>
+              <option value="capetown|santos">Cidade do Cabo → Santos</option>
+              <option value="durban|singapore">Durban → Cingapura</option>
+              <option value="shanghai|losangeles">Xangai → Los Angeles</option>
+              <option value="current">Rota atual (portos escolhidos em Navegação)</option>
+              <option value="cursor">Ponto livre (último ponto sob o cursor)</option>
+            </select>
+          </label>
+          <label class="rng" id="spill-pos-wrap">
+            <span>Ponto do incidente: <b id="spill-pos-val">50%</b> do trajeto</span>
+            <input type="range" id="spill-pos" min="0" max="100" value="50" />
+          </label>
+          <div class="spill-grid">
+            <label class="rng">Horas à deriva
+              <input type="number" id="spill-hours" min="1" max="240" step="1" value="18" inputmode="numeric" />
+            </label>
+            <label class="rng">Óleo (t) <em>opcional</em>
+              <input type="number" id="spill-volume" min="1" max="500000" step="10" placeholder="500" inputmode="numeric" />
+            </label>
+          </div>
+          <button id="spill-run" class="btn-spill" type="button">🚨 Calcular e Simular Deriva</button>
+        </div>
+
+        <div id="ai-drift-metrics" class="rinfo" hidden>
+          <div class="ai-metric">Tempo à deriva: <b id="ai-drift-time"></b></div>
+          <div class="ai-metric">Distância derivada: <b id="ai-drift-dist"></b></div>
+          <div class="ai-metric">Velocidade média de arraste: <b id="ai-drift-speed"></b></div>
+          <div class="ai-metric" data-opt>Deslocamento (X, Y): <b id="ai-drift-xy"></b></div>
+          <div class="ai-metric" data-opt>Raio da mancha: <b id="ai-drift-radius"></b></div>
+          <div class="ai-metric" data-opt>Origem da avaria: <b id="ai-drift-origin"></b></div>
+          <div class="ai-metric" data-opt>Posição atual do navio: <b id="ai-drift-ship"></b></div>
+          <div class="ai-metric ai-aground" id="ai-drift-aground" hidden></div>
+        </div>
 
         <div class="grp-h">
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
@@ -108,6 +197,12 @@
       <canvas id="base"></canvas>
       <canvas id="flow"></canvas>
       <canvas id="route"></canvas>
+
+      <div id="port-tooltip" class="port-tooltip" hidden></div>
+      <div id="sim-tooltip" class="sim-tooltip" hidden>
+        <div class="sim-tt-title" id="sim-tt-title"></div>
+        <div class="sim-tt-body" id="sim-tt-body"></div>
+      </div>
 
       <div id="brand">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 9c1.5-2 3.5-2 5 0s3.5 2 5 0 3.5-2 5 0 3.5 2 5 0"/><path d="M2 15c1.5-2 3.5-2 5 0s3.5 2 5 0 3.5-2 5 0 3.5 2 5 0"/></svg>
@@ -135,6 +230,11 @@
           <div class="lg-title">Rotas de navegação</div>
           <div class="lg-navline"><span class="lg-navdash"></span> comerciais e estratégicas</div>
         </div>
+        <div class="lg-block" id="lg-ports" hidden>
+          <div class="lg-title">Portos de Desembarque</div>
+          <div class="lg-navline"><span class="lg-portdot"></span> hubs, regionais e terminais</div>
+          <div class="lg-navline"><em>aproxime o zoom para revelar mais portos</em></div>
+        </div>
         <div class="lg-block" id="lg-sst" hidden>
           <div class="lg-title">Temperatura da superfície (°C)</div>
           <canvas id="lg-sst-bar" width="200" height="9"></canvas>
@@ -146,11 +246,81 @@
     </div>
   </div>
 
+  <div id="route-analytics" class="ra-modal" hidden>
+    <div class="ra-backdrop"></div>
+    <div class="ra-panel" role="dialog" aria-modal="true" aria-labelledby="ra-title">
+      <button id="ra-close" class="ra-close" type="button" aria-label="Fechar análise">✕</button>
+      <div class="ra-header">
+        <div class="ra-title" id="ra-title">Análise da Rota</div>
+        <div class="ra-subtitle" id="ra-subtitle"></div>
+      </div>
+      <div class="ra-table-wrap">
+        <table class="ra-table">
+          <thead>
+            <tr>
+              <th>Indicador</th>
+              <th>1. Rota Comercial</th>
+              <th>2. Algoritmo A*</th>
+              <th>3. Copiloto IA</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>⛵ Abordagem</td>
+              <td>Rota tradicional de mercado<br><small>menor distância, ignora correntes</small></td>
+              <td>Menor tempo c/ matriz de correntes<br><small>t = d ÷ |<i>v</i><sub>navio</sub> + <i>v</i><sub>corrente</sub>| (vetorial)</small></td>
+              <td>Multiobjetivo: combustível + ETA<br><small>potência ajustada por trecho</small></td>
+            </tr>
+            <tr>
+              <td>⚙️ Velocidade / potência</td>
+              <td id="ra3-speed-0"></td>
+              <td id="ra3-speed-1"></td>
+              <td id="ra3-speed-2"></td>
+            </tr>
+            <tr>
+              <td>📏 Distância</td>
+              <td id="ra3-dist-0"></td>
+              <td id="ra3-dist-1"></td>
+              <td id="ra3-dist-2"></td>
+            </tr>
+            <tr>
+              <td>⏱️ Tempo estimado</td>
+              <td id="ra3-time-0"></td>
+              <td id="ra3-time-1"></td>
+              <td id="ra3-time-2"></td>
+            </tr>
+            <tr>
+              <td>⛽ Combustível (VLSFO)</td>
+              <td id="ra3-fuel-0"></td>
+              <td id="ra3-fuel-1"></td>
+              <td id="ra3-fuel-2"></td>
+            </tr>
+            <tr>
+              <td>🍃 CO₂ evitado</td>
+              <td id="ra3-co2-0"></td>
+              <td id="ra3-co2-1"></td>
+              <td id="ra3-co2-2"></td>
+            </tr>
+            <tr>
+              <td>💲 Economia</td>
+              <td id="ra3-cost-0"></td>
+              <td id="ra3-cost-1"></td>
+              <td id="ra3-cost-2"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="ra-rationale" id="ra-rationale"></div>
+      <div class="ra-footnote">Economias das colunas 2 e 3 em relação à rota comercial. Consumo ∝ v³ (referência ~180&nbsp;t/dia a 20&nbsp;nós), VLSFO a US$&nbsp;600/t, 3,114&nbsp;t&nbsp;CO₂/t de combustível. O Copiloto respeita o ETA da rota comercial ou uma janela de atracação de até 3% após o A*, com piso de 75% da velocidade de serviço.</div>
+    </div>
+  </div>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
   <script src="world-land.js"></script>
   <script src="world-countries.js"></script>
   <script src="ocean-data.js"></script>
   <script src="dados-marinhos.js"></script>
+  <script src="global-ports-data.js"></script>
   <script src="script.js" defer></script>
 </body>
 </html>
