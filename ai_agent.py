@@ -264,23 +264,24 @@ def is_land(lon, lat):
     return False
 
 
-_nav_mask = None
+_raw_mask = None
 _nav_lock = threading.Lock()
 
 
-def _build_nav_mask():
-    global _nav_mask
-    if _nav_mask is not None:
-        return _nav_mask
+def _raw_nav_mask():
+    """Terra/água bruta da grade de 1° (point-in-polygon no world-land.js), cacheada em disco."""
+    global _raw_mask
+    if _raw_mask is not None:
+        return _raw_mask
     with _nav_lock:
-        if _nav_mask is not None:
-            return _nav_mask
+        if _raw_mask is not None:
+            return _raw_mask
         if LANDMASK_CACHE.exists():
             try:
                 data = json.loads(LANDMASK_CACHE.read_text(encoding="utf-8"))
                 if data.get("nlon") == NAV_NLON and data.get("nlat") == NAV_NLAT:
-                    _nav_mask = bytes(data["mask"])
-                    return _nav_mask
+                    _raw_mask = bytes(data["mask"])
+                    return _raw_mask
             except Exception:
                 pass
 
@@ -290,15 +291,152 @@ def _build_nav_mask():
             for i in range(NAV_NLON):
                 lon = -180.0 + i * NAV_RES
                 mask[j * NAV_NLON + i] = 0 if (abs(lat) > 84 or is_land(lon, lat)) else 1
-        _nav_mask = bytes(mask)
         try:
             LANDMASK_CACHE.write_text(
-                json.dumps({"nlon": NAV_NLON, "nlat": NAV_NLAT, "mask": list(_nav_mask)}),
+                json.dumps({"nlon": NAV_NLON, "nlat": NAV_NLAT, "mask": list(mask)}),
                 encoding="utf-8",
             )
         except Exception:
             pass
-        return _nav_mask
+        _raw_mask = bytes(mask)
+        return _raw_mask
+
+
+# ---------------- cenário de navegação: estreitos, canais, gelo ártico e zonas de risco ----------------
+# Na grade de 1° (e no contorno 1:110m) vários estreitos reais somem e isolam mares inteiros.
+# Estes corredores de células (lat, lon) são SEMPRE navegáveis — ligam esses mares ao oceano.
+STRAITS = {
+    "Estreito de Dover": [(51, 2), (51, 1), (50, 1), (50, 0), (50, -1)],
+    "Estreito de Juan de Fuca": [(48, -123), (48, -124), (48, -125), (48, -126)],
+    "Estreitos dinamarqueses": [(58, 10), (57, 10), (57, 11), (56, 11), (56, 12), (55, 12), (55, 13),
+                                (55, 14), (55, 15), (55, 16)],
+    "Bósforo e Dardanelos": [(42, 29), (41, 29), (41, 28), (40, 28), (40, 27), (40, 26), (39, 26), (39, 25)],
+    "Mar Egeu": [(40, 23), (40, 24), (39, 24), (38, 24), (38, 25), (37, 25), (36, 25), (35, 25)],
+    "Bab-el-Mandeb": [(14, 42), (13, 42), (13, 43), (12, 43), (12, 44), (12, 45)],
+    "Estuário do São Lourenço": [(49, -68), (49, -67), (49, -66), (50, -66), (50, -65)],
+    "Golfo da Finlândia": [(58, 20), (59, 20), (59, 21), (59, 22), (59, 23), (59, 24), (60, 24), (60, 25),
+                           (60, 26), (60, 27), (60, 28)],
+    "Golfo de Honduras": [(16, -88), (16, -87), (16, -86), (17, -86), (17, -85), (17, -84)],
+    "Estreito de Malaca": [(6, 96), (6, 97), (5, 97), (5, 98), (4, 98), (4, 99), (3, 99), (3, 100), (2, 100),
+                           (2, 101), (2, 102), (1, 102), (1, 103), (1, 104), (1, 105)],
+}
+# Istmos que a grade de 1° "vaza" (ex.: a lagoa de Chiriquí em 9°N 82°O deixava o A* cruzar a
+# América Central por terra, com ou sem Canal do Panamá). Nestas caixas (lat0, lat1, lon0, lon1),
+# toda célula de água encostada em terra vira terra; a passagem volta só pelo corredor do canal.
+ISTHMUS_BOXES = [(7.0, 18.5, -95.0, -77.5)]
+# Canais artificiais: abertos por padrão, fechados pelo usuário (cenário de bloqueio).
+CANALS = {
+    # passa pela célula 9°N 79,6°O; as pontas vão até água aberta dos dois lados do istmo
+    "panama": [(12, -80), (11, -80), (10, -80), (9, -80), (9, -79), (8, -79), (7, -79), (6, -79)],
+    "suez": [(31, 32), (30, 32), (29, 32), (29, 33), (28, 33), (27, 33), (27, 34)],  # inclui 29,9°N 32,5°E
+}
+# Acima disto o Ártico fica fechado ao tráfego comercial (gelo marinho); sem isso o A* "atalhava"
+# pela Passagem do Noroeste / Rota do Mar do Norte, que navios comerciais não usam.
+ARCTIC_MAX_LAT = 73.0
+# Zonas de alto risco (pirataria/conflito): caixas (lat0, lat1, lon0, lon1) com custo multiplicado.
+RISK_ZONES = {
+    "redsea": [(12.0, 30.5, 32.0, 44.0), (10.0, 16.0, 42.0, 52.0)],  # Mar Vermelho + Golfo de Áden
+}
+RISK_PENALTY = 25.0  # "penalização extrema": só entra se não houver alternativa razoável
+
+_nav_masks = {}
+
+
+def _scenario_key(scenario):
+    s = scenario or {}
+    return (not s.get("block_panama"), not s.get("block_suez"))
+
+
+def nav_mask_for(scenario=None):
+    """Máscara de navegação do cenário: água bruta + estreitos + canais abertos − Ártico, só com o
+    oceano conectado (lagos e mares sem saída saem). Cacheada por combinação de canais."""
+    key = _scenario_key(scenario)
+    if key in _nav_masks:
+        return _nav_masks[key]
+    raw = _raw_nav_mask()
+    mask = bytearray(raw)
+    for la0, la1, lo0, lo1 in ISTHMUS_BOXES:
+        for lat in range(int(math.ceil(la0)), int(math.floor(la1)) + 1):
+            for lon in range(int(math.ceil(lo0)), int(math.floor(lo1)) + 1):
+                a = int(round((90.0 - lat) / NAV_RES))
+                o = int(round((lon + 180.0) / NAV_RES)) % NAV_NLON
+                if raw[a * NAV_NLON + o] and any(
+                    not raw[(a + da) * NAV_NLON + (o + db) % NAV_NLON] for da, db in NB8
+                ):
+                    mask[a * NAV_NLON + o] = 0
+
+    def open_cells(cells):
+        for lat, lon in cells:
+            a = int(round((90.0 - lat) / NAV_RES))
+            o = int(round((lon + 180.0) / NAV_RES)) % NAV_NLON
+            mask[a * NAV_NLON + o] = 1
+
+    for cells in STRAITS.values():
+        open_cells(cells)
+    if key[0]:
+        open_cells(CANALS["panama"])
+    if key[1]:
+        open_cells(CANALS["suez"])
+    for a in range(NAV_NLAT):
+        if 90.0 - a * NAV_RES > ARCTIC_MAX_LAT:
+            mask[a * NAV_NLON:(a + 1) * NAV_NLON] = bytes(NAV_NLON)
+    result = _keep_ocean_only(mask)
+    _nav_masks[key] = result
+    return result
+
+
+def _build_nav_mask():
+    return nav_mask_for(None)
+
+
+def risk_boxes(scenario):
+    s = scenario or {}
+    return RISK_ZONES["redsea"] if s.get("avoid_redsea") else []
+
+
+def risk_factor(lon, lat, boxes):
+    for la0, la1, lo0, lo1 in boxes:
+        if la0 <= lat <= la1 and lo0 <= lon <= lo1:
+            return RISK_PENALTY
+    return 1.0
+
+
+def _keep_ocean_only(mask):
+    """Zera as células de água que não se ligam ao oceano (lagos/mares fechados no
+    contorno do mapa): fica só o maior componente conectado, com as MESMAS regras de
+    movimento do A* (8 vizinhos, volta no antimeridiano, diagonal só sem cortar quina
+    de terra). Assim nenhum porto é "encaixado" num nó que o A* não alcança."""
+    mask = bytearray(mask)
+    comp = [0] * len(mask)
+    best_id, best_size, cid = 0, 0, 0
+    for start in range(len(mask)):
+        if not mask[start] or comp[start]:
+            continue
+        cid += 1
+        comp[start] = cid
+        stack, size = [start], 0
+        while stack:
+            cur = stack.pop()
+            size += 1
+            ca, co = divmod(cur, NAV_NLON)
+            for da, db in NB8:
+                na = ca + da
+                if na < 0 or na >= NAV_NLAT:
+                    continue
+                no = (co + db) % NAV_NLON
+                ni = na * NAV_NLON + no
+                if not mask[ni] or comp[ni]:
+                    continue
+                if da and db and not (mask[ca * NAV_NLON + no] and mask[na * NAV_NLON + co]):
+                    continue
+                comp[ni] = cid
+                stack.append(ni)
+        if size > best_size:
+            best_id, best_size = cid, size
+    for i in range(len(mask)):
+        if mask[i] and comp[i] != best_id:
+            mask[i] = 0
+    return bytes(mask)
 
 
 def warmup():
@@ -388,11 +526,11 @@ def path_hours(grid, path, ship_kn):
 
 
 # ---------------- Rota 1: Comercial padrão ----------------
-def commercial_route(a_ll, b_ll, ship_kn):
+def commercial_route(a_ll, b_ll, ship_kn, scenario=None):
     """Rota comercial tradicional de mercado: o menor caminho NAVEGÁVEL em distância
     (como nas tabelas de distâncias portuárias), a velocidade de serviço constante e
     planejado sem olhar as correntes. O tempo devolvido é o real, com as correntes."""
-    r = astar_route(a_ll, b_ll, ship_kn, current_weight=0.0)
+    r = astar_route(a_ll, b_ll, ship_kn, current_weight=0.0, scenario=scenario)
     if not r:
         return None
     return {"path": r["path"], "hours": path_hours(get_current_grid(), r["path"], ship_kn)}
@@ -410,12 +548,18 @@ def _nav_lat(a):
     return 90.0 - a * NAV_RES
 
 
-def _nav_snap(mask, lon, lat):
+def find_nearest_water_cell(lat, lon, grid, max_radius=3, fallback_radius=30):
+    """Nó de água navegável (ligado ao oceano) mais próximo de (lat, lon) na grade
+    náutica `grid` (a máscara de navegação). Se o nó do porto cair em terra, busca em
+    espiral — anéis de raio 1 a `max_radius` nós primeiro; portos muito para dentro do
+    continente (ex.: Manaus) continuam a busca até `fallback_radius`. Devolve (linha,
+    coluna) do nó, que vira o início/fim do A*, ou None."""
     o0 = int(round((lon - (-180.0)) / NAV_RES)) % NAV_NLON
     a0 = max(0, min(NAV_NLAT - 1, int(round((90.0 - lat) / NAV_RES))))
-    if mask[a0 * NAV_NLON + o0]:
+    if grid[a0 * NAV_NLON + o0]:
         return a0, o0
-    for r in range(1, 30):
+    for r in range(1, max(max_radius, fallback_radius) + 1):
+        best, best_d = None, float("inf")  # dentro do anel, o nó mais perto de verdade
         for da in range(-r, r + 1):
             a = a0 + da
             if a < 0 or a >= NAV_NLAT:
@@ -424,28 +568,121 @@ def _nav_snap(mask, lon, lat):
                 if max(abs(da), abs(db)) != r:
                     continue
                 o = (o0 + db) % NAV_NLON
-                if mask[a * NAV_NLON + o]:
-                    return a, o
+                if grid[a * NAV_NLON + o]:
+                    d = hav_km(lon, lat, _nav_lon(o), _nav_lat(a))
+                    if d < best_d:
+                        best, best_d = (a, o), d
+        if best:
+            return best
     return None
 
 
-def astar_route(a_ll, b_ll, ship_kn, current_weight=1.0, max_nodes=150000):
+def astar_route(a_ll, b_ll, ship_kn, current_weight=1.0, max_nodes=150000, scenario=None):
+    """A* de menor tempo: custo da aresta = edge_hours (tempo real com a corrente), multiplicado
+    pela penalidade de zona de risco do cenário. `hours` é sempre o tempo real (sem a penalidade)."""
     grid = get_current_grid()
-    mask = _build_nav_mask()
-    sa = _nav_snap(mask, a_ll[0], a_ll[1])
-    sb = _nav_snap(mask, b_ll[0], b_ll[1])
+    max_ground = (ship_kn + 6) * KMH_PER_KN
+    boxes = risk_boxes(scenario)
+
+    def cost(lo1, la1, lo2, la2):
+        dt = edge_hours(grid, lo1, la1, lo2, la2, ship_kn, current_weight)
+        return dt * risk_factor((lo1 + lo2) / 2, (la1 + la2) / 2, boxes) if boxes else dt
+
+    r = _grid_search(a_ll, b_ll, cost, lambda km: km / max_ground, max_nodes, nav_mask_for(scenario))
+    if not r:
+        return None
+    hours = r["cost"] if not boxes else sum(
+        edge_hours(grid, r["path"][i - 1][0], r["path"][i - 1][1], r["path"][i][0], r["path"][i][1],
+                   ship_kn, current_weight) for i in range(1, len(r["path"])))
+    return {"path": r["path"], "hours": hours}
+
+
+# ---------------- Rota 3: Copiloto IA — busca própria focada em combustível ----------------
+AI_ADVERSE_WEIGHT = 1.5    # fator acrescido sobre a corrente contrária dentro da lei cúbica
+AI_CROSS_PENALTY = 0.8     # peso extra por corrente transversal (motor gasto só p/ manter o rumo)
+
+
+def _edge_current_kmh(grid, lo1, la1, lo2, la2):
+    """Comprimento do trecho (km) e componentes da corrente ao longo (c∥) e através (c⊥) dele, em km/h."""
+    lat_m = (la1 + la2) / 2
+    dlon = ((lo2 - lo1 + 540) % 360) - 180
+    dx = dlon * 111.32 * math.cos(math.radians(lat_m))
+    dy = (la2 - la1) * 110.57
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return 0.0, 0.0, 0.0
+    ex, ey = dx / length, dy / length
+    u_ms, v_ms = grid.sample(lo1 + dlon / 2, lat_m)
+    cu, cv = u_ms * 3.6, v_ms * 3.6
+    c_par = cu * ex + cv * ey
+    c_perp = math.sqrt(max(0.0, cu * cu + cv * cv - c_par * c_par))
+    return length, c_par, c_perp
+
+
+AI_MODE_LABEL = "100% Eco / Slow Steaming"
+
+
+def ai_astar_route(a_ll, b_ll, ship_kn, max_nodes=150000, scenario=None):
+    """Busca A* do Copiloto IA em 100% Eco (slow steaming agressivo + fuga de correntes contrárias):
+        Custo(aresta) = Combustível(v³) / consumo_horário_de_serviço
+    Combustível = t queimadas no piso de slow steaming (75% da velocidade de serviço; consumo/h ∝ v³),
+    com penalidade cúbica na corrente contrária — ((v + k·c)/v)³ — e linear na transversal.
+    O divisor só normaliza a escala; o tempo de viagem não entra no custo."""
+    grid = get_current_grid()
+    v_plan = max(6.0, ship_kn * ECO_ETA_FRAC)
+    vs = v_plan * KMH_PER_KN
+    rate = fuel_tons_per_hour(v_plan)
+    rate_service = fuel_tons_per_hour(ship_kn)
+    weight = AI_ADVERSE_WEIGHT
+    cross = AI_CROSS_PENALTY
+    boxes = risk_boxes(scenario)
+
+    def cost(lo1, la1, lo2, la2):
+        length, c_par, c_perp = _edge_current_kmh(grid, lo1, la1, lo2, la2)
+        if length == 0.0:
+            return 0.0
+        avail = vs * vs - c_perp * c_perp
+        if avail <= 1:
+            return float("inf")
+        ground = math.sqrt(avail) + c_par
+        if ground < 0.5:
+            return float("inf")
+        dt = length / ground
+        # manter a mesma velocidade de fundo contra uma corrente c exige ~(v + c) na água,
+        # e o consumo/h cresce com o cubo disso: ((v + k·c)/v)³ penaliza os nós de mar de proa
+        adverse = ((vs + weight * max(0.0, -c_par)) / vs) ** 3
+        fuel = rate * dt * adverse * (1.0 + cross * c_perp / vs)
+        c = fuel / rate_service
+        return c * risk_factor((lo1 + lo2) / 2, (la1 + la2) / 2, boxes) if boxes else c
+
+    max_ground = vs + 6 * KMH_PER_KN
+    per_km = (rate / rate_service) / max_ground  # penalidades >= 1: admissível
+    r = _grid_search(a_ll, b_ll, cost, lambda km: per_km * km, max_nodes, nav_mask_for(scenario))
+    if not r:
+        return None
+    return {"path": r["path"], "hours": path_hours(grid, r["path"], ship_kn)}
+
+
+def _grid_search(a_ll, b_ll, edge_cost, heuristic, max_nodes=150000, mask=None):
+    """A* genérico na grade náutica (8 vizinhos, sem cortar quina de terra).
+    edge_cost(lon1, lat1, lon2, lat2) -> custo >= 0 (inf = intransponível);
+    heuristic(km_restantes) -> estimativa otimista do custo até o destino;
+    mask: máscara de navegação do cenário (padrão: canais abertos)."""
+    if mask is None:
+        mask = _build_nav_mask()
+    sa = find_nearest_water_cell(a_ll[1], a_ll[0], mask)
+    sb = find_nearest_water_cell(b_ll[1], b_ll[0], mask)
     if not sa or not sb:
         return None
 
     start = sa[0] * NAV_NLON + sa[1]
     goal = sb[0] * NAV_NLON + sb[1]
     goal_lon, goal_lat = _nav_lon(sb[1]), _nav_lat(sb[0])
-    max_ground = (ship_kn + 6) * KMH_PER_KN
 
     g = {start: 0.0}
     came = {}
     closed = set()
-    h0 = hav_km(_nav_lon(sa[1]), _nav_lat(sa[0]), goal_lon, goal_lat) / max_ground
+    h0 = heuristic(hav_km(_nav_lon(sa[1]), _nav_lat(sa[0]), goal_lon, goal_lat))
     heap = [(h0, start)]
     nodes = 0
 
@@ -472,14 +709,14 @@ def astar_route(a_ll, b_ll, ship_kn, current_weight=1.0, max_nodes=150000):
             if da != 0 and db != 0:
                 if not mask[ca * NAV_NLON + no] or not mask[na * NAV_NLON + co]:
                     continue
-            dt = edge_hours(grid, clon, clat, _nav_lon(no), _nav_lat(na), ship_kn, current_weight)
-            if not math.isfinite(dt):
+            dc = edge_cost(clon, clat, _nav_lon(no), _nav_lat(na))
+            if not math.isfinite(dc):
                 continue
-            ng = g[cur] + dt
+            ng = g[cur] + dc
             if ng < g.get(ni, float("inf")):
                 g[ni] = ng
                 came[ni] = cur
-                pri = ng + hav_km(_nav_lon(no), _nav_lat(na), goal_lon, goal_lat) / max_ground
+                pri = ng + heuristic(hav_km(_nav_lon(no), _nav_lat(na), goal_lon, goal_lat))
                 heapq.heappush(heap, (pri, ni))
 
     if goal not in came and goal != start:
@@ -493,12 +730,12 @@ def astar_route(a_ll, b_ll, ship_kn, current_weight=1.0, max_nodes=150000):
             break
         c = came[c]
     path.reverse()
-    return {"path": path, "hours": g[goal]}
+    return {"path": path, "cost": g[goal]}
 
 
 # ---------------- Rota 3: Copiloto IA — gestão de potência / combustível ----------------
-ETA_SLACK = 0.03      # janela de atracação: pode chegar até 3% depois do A* (ou no ETA da rota comercial)
-MIN_SPEED_FRAC = 0.75  # piso de slow steaming: abaixo de ~75% da velocidade de serviço o motor opera mal
+MIN_SPEED_FRAC = 0.60  # piso do motor por trecho (slow steaming profundo): 60% da velocidade de serviço
+ECO_ETA_FRAC = 0.75    # ETA-alvo 100% Eco = tempo do trajeto a 75% da velocidade de serviço
 SPEED_STEP_KN = 0.25
 
 
@@ -569,32 +806,56 @@ def optimize_power(grid, path, ship_kn, eta_budget_h):
     }
 
 
-def llm_rationale(comm_m, astar_m, ai_m):
+def _offline_prefix():
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+        return "Análise técnica (LLM indisponível — veja os avisos do Gemini no terminal): "
+    return "Análise técnica (Copiloto offline, sem GEMINI_API_KEY/OPENAI_API_KEY): "
+
+
+def llm_rationale(comm_m, astar_m, ai_m, scenario=None, rationale_fn=None):
     """O LLM não traça rota: recebe os números já calculados (rota comercial, A* e o
     perfil de potência) e redige a análise técnica pra equipe de navegação. Sem LLM
-    disponível, gera a mesma análise de forma determinística — sempre com os números reais."""
+    disponível, gera a mesma análise de forma determinística — sempre com os números reais.
+
+    rationale_fn(comm_m, astar_m, ai_m, scenario) -> str | None: gerador externo do parecer
+    (o servidor usa a SDK google.generativeai). Quando informado, substitui a chamada REST
+    interna; se devolver None, cai direto no texto determinístico."""
+    if rationale_fn is not None:
+        try:
+            texto = rationale_fn(comm_m, astar_m, ai_m, scenario)
+        except Exception as e:
+            print(f"[GEMINI INFO] gerador de parecer falhou: {e}")
+            texto = None
+        if texto and str(texto).strip():
+            return str(texto).strip()
+        return _offline_prefix() + deterministic_analysis(comm_m, astar_m, ai_m)
+
     def pick(m, keys):
         return {k: round(m[k], 2) for k in keys if k in m and isinstance(m[k], (int, float)) and math.isfinite(m[k])}
 
     base_keys = ("km", "hours", "fuel_tons", "co2_tons")
     ai_desc = pick(ai_m, base_keys + ("avg_kn", "min_kn", "max_kn", "load_pct", "service_kn"))
     ai_desc["fracao_da_distancia_com_motor_reduzido"] = round(ai_m.get("eco_share", 0.0), 3)
+    contexto = ""
+    if scenario_label(scenario):
+        contexto += f"Cenário geopolítico ativo: {scenario_label(scenario)}.\n"
     prompt = (
         "Você é o Copiloto IA de um navio, responsável pela gestão de combustível. Três "
         "planos para o mesmo trajeto (todos validados, sem cruzar terra):\n"
-        "1) Rota comercial padrão (menor distância, velocidade constante, ignora correntes): %s\n"
-        "2) A* (menor tempo usando a matriz de correntes, velocidade constante): %s\n"
-        "3) Copiloto IA (mesmo caminho do A*, potência do motor ajustada trecho a trecho "
-        "para minimizar VLSFO dentro do ETA): %s\n"
+        f"1) Rota comercial padrão (menor distância, velocidade constante, ignora correntes): "
+        f"{json.dumps(pick(comm_m, base_keys))}\n"
+        f"2) A* (menor tempo usando a matriz de correntes, velocidade constante): "
+        f"{json.dumps(pick(astar_m, base_keys))}\n"
+        "3) Copiloto IA em 100% Eco (slow steaming agressivo; traçado próprio, buscado para minimizar combustível evitando "
+        "correntes contrárias e transversais fortes, com a potência do motor ajustada trecho "
+        f"a trecho dentro do ETA): {json.dumps(ai_desc)}\n"
+        f"{contexto}"
         "Escreva, em português, uma análise técnica de 2 a 3 frases para a equipe de "
-        "navegação: onde e por que a potência foi reduzida, quanto VLSFO e CO2 se economiza "
-        "em relação à rota comercial e o impacto no ETA. Use os números fornecidos, sem inventar outros. "
+        "navegação: por que o traçado do Copiloto difere do A*, onde a potência foi reduzida, "
+        "quanto VLSFO e CO2 se economiza em relação à rota comercial e o impacto no ETA"
+        f"{' e do cenário geopolítico' if scenario_label(scenario) else ''}. "
+        "Use os números fornecidos, sem inventar outros. "
         'Responda SOMENTE com um JSON: {"motivo": "..."}'
-        % (
-            json.dumps(pick(comm_m, base_keys)),
-            json.dumps(pick(astar_m, base_keys)),
-            json.dumps(ai_desc),
-        )
     )
     raw = call_llm_text(prompt)
     if raw:
@@ -605,11 +866,7 @@ def llm_rationale(comm_m, astar_m, ai_m):
         except Exception:
             pass
 
-    if os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY"):
-        prefix = "Análise técnica (LLM indisponível — veja [ERRO GEMINI DETALHADO] no terminal): "
-    else:
-        prefix = "Análise técnica (Copiloto offline, sem GEMINI_API_KEY/OPENAI_API_KEY): "
-    return prefix + deterministic_analysis(comm_m, astar_m, ai_m)
+    return _offline_prefix() + deterministic_analysis(comm_m, astar_m, ai_m)
 
 
 def _br(v, d=1):
@@ -623,11 +880,15 @@ def deterministic_analysis(comm_m, astar_m, ai_m):
     pct = 100 * dfuel / comm_m["fuel_tons"] if comm_m["fuel_tons"] > 0 else 0.0
     eta_delta = ai_m["hours"] - comm_m["hours"]
     eta_txt = (f"chegando {_br(abs(eta_delta))} h antes da rota comercial" if eta_delta < -0.05 else
-               f"com ETA {_br(eta_delta)} h após a rota comercial (dentro da janela de atracação)" if eta_delta > 0.05 else
+               f"com ETA {_br(eta_delta)} h após a rota comercial" if eta_delta > 0.05 else
                "mantendo o mesmo ETA da rota comercial")
+    dkm = ai_m["km"] - astar_m["km"]
+    rota_txt = (f"traça um desvio próprio {_br(abs(dkm) * 0.539957)} NM "
+                f"{'mais longo' if dkm > 0 else 'mais curto'} que o A* para fugir de correntes contrárias e transversais"
+                if abs(dkm) > 1 else "segue praticamente o mesmo corredor do A* (correntes fracas nesta travessia)")
     return (
         f"o A* ganha {_br(gain_h)} h sobre a rota comercial explorando as correntes; o Copiloto "
-        f"converte esse ganho em economia, variando a velocidade entre {_br(ai_m['min_kn'])} e "
+        f"{rota_txt}, variando a velocidade entre {_br(ai_m['min_kn'])} e "
         f"{_br(ai_m['max_kn'])} nós (média {_br(ai_m['avg_kn'])} nós, carga média {_br(ai_m['load_pct'], 0)}% "
         f"da potência de serviço) e reduzindo o motor em {_br(100 * ai_m['eco_share'], 0)}% do trajeto. "
         f"Resultado: −{_br(dfuel)} t de VLSFO (−{_br(pct, 0)}%), −{_br(dfuel * CO2_PER_TON_FUEL)} t de CO₂ "
@@ -635,11 +896,25 @@ def deterministic_analysis(comm_m, astar_m, ai_m):
     )
 
 
-def compute_three_routes(a_ll, b_ll, ship_kn=18.0):
+def scenario_label(scenario):
+    s = scenario or {}
+    parts = []
+    if s.get("block_panama"):
+        parts.append("Canal do Panamá bloqueado")
+    if s.get("block_suez"):
+        parts.append("Canal de Suez bloqueado")
+    if s.get("avoid_redsea"):
+        parts.append("evitando Mar Vermelho / Golfo de Áden")
+    return "; ".join(parts)
+
+
+def compute_three_routes(a_ll, b_ll, ship_kn=18.0, scenario=None, rationale_fn=None):
+    """3 rotas no cenário dado; o Copiloto IA opera sempre em 100% Eco.
+    scenario = {"block_panama", "block_suez"} (booleans)."""
     grid = get_current_grid()
 
-    comm = commercial_route(a_ll, b_ll, ship_kn)
-    astar = astar_route(a_ll, b_ll, ship_kn, current_weight=1.0)
+    comm = commercial_route(a_ll, b_ll, ship_kn, scenario)
+    astar = astar_route(a_ll, b_ll, ship_kn, current_weight=1.0, scenario=scenario)
     if not comm or not astar:
         return None
     # A* é ótimo em tempo no mesmo grafo; se por arredondamento a rota comercial sair
@@ -650,21 +925,45 @@ def compute_three_routes(a_ll, b_ll, ship_kn=18.0):
     comm_m = route_metrics(comm["path"], comm["hours"], ship_kn)
     astar_m = route_metrics(astar["path"], astar["hours"], ship_kn)
 
-    eta_budget = max(comm["hours"], astar["hours"] * (1 + ETA_SLACK))
-    ai_m = optimize_power(grid, astar["path"], ship_kn, eta_budget)
-    rationale = llm_rationale(comm_m, astar_m, ai_m)
+    # traçado próprio do Copiloto (100% Eco); sem ele, cai no caminho do A*
+    ai_path_res = ai_astar_route(a_ll, b_ll, ship_kn, scenario=scenario) or astar
+    # ETA-alvo da gestão de potência (100% Eco): até o piso de slow steaming
+    # (75% da velocidade) no trajeto inteiro; por trecho o motor pode ir de 60% a 100%,
+    # então o otimizador redistribui a potência conforme as correntes
+    eta_budget = ai_path_res["hours"] / ECO_ETA_FRAC
+    ai_m = optimize_power(grid, ai_path_res["path"], ship_kn, eta_budget)
+    ai_m["mode"] = AI_MODE_LABEL
+    rationale = llm_rationale(comm_m, astar_m, ai_m, scenario, rationale_fn)
 
-    return {
+    result = {
         "baseline": dict(path=comm["path"], service_kn=ship_kn, **comm_m),
         "astar": dict(path=astar["path"], service_kn=ship_kn, **astar_m),
-        "llm": dict(path=astar["path"], rationale=rationale, **ai_m),
+        "llm": dict(path=ai_path_res["path"], rationale=rationale, **ai_m),
     }
+
+    # custo do cenário: o A* de menor tempo com canais abertos e sem zona de risco, para comparar
+    label = scenario_label(scenario)
+    if label:
+        free = astar_route(a_ll, b_ll, ship_kn, current_weight=1.0)
+        if free:
+            free_m = route_metrics(free["path"], free["hours"], ship_kn)
+            extra_fuel = astar_m["fuel_tons"] - free_m["fuel_tons"]
+            result["scenario"] = {
+                "label": label,
+                "extra_nm": round((astar_m["km"] - free_m["km"]) * 0.539957, 1),
+                "extra_hours": round(astar_m["hours"] - free_m["hours"], 2),
+                "extra_fuel_tons": round(extra_fuel, 1),
+                "extra_usd": round(extra_fuel * FUEL_PRICE_USD),
+            }
+    return result
 
 
 # ============================================================
 # ferramentas do copiloto (tool calling)
 # ============================================================
 _COMPASS = ["N", "NE", "L", "SE", "S", "SO", "O", "NO"]
+_COMPASS_NOME = {"N": "Norte", "NE": "Nordeste", "L": "Leste", "SE": "Sudeste",
+                 "S": "Sul", "SO": "Sudoeste", "O": "Oeste", "NO": "Noroeste"}
 
 
 def bearing_deg(lo1, la1, lo2, la2):
@@ -705,17 +1004,17 @@ def simular_vazamento(lat, lon, volume_ton=500.0, horas=24):
     brg = bearing_deg(lon, lat, clon, clat) if drift_km > 0.05 else None
     compass = compass_dir(brg) if brg is not None else None
 
-    if compass:
+    if compass and drift_km > 0.5:
         explanation = (
-            "Conclusão da IA: Modelo de advecção-difusão calculado com base nos vetores de "
-            f"superfície atuais (direção {compass} a {drift_speed_kn:.1f} nós). O navio/mancha "
-            f"derivou {drift_nm:.1f} NM ao longo de {horas} horas."
+            "Resumo do Incidente (IA): As correntes marítimas empurraram o navio e o óleo em direção ao "
+            f"{_COMPASS_NOME.get(compass, compass)} a uma velocidade de {_br(drift_km / horas)} km/h. "
+            f"Em {horas} horas, a mancha de óleo e o navio foram levados por cerca de "
+            f"{round(drift_km)} km longe do ponto inicial do acidente."
         )
     else:
         explanation = (
-            "Conclusão da IA: Modelo de advecção-difusão calculado com base nos vetores de "
-            f"superfície atuais — correntes fracas no ponto, deriva de apenas {drift_nm:.1f} NM "
-            f"em {horas} horas."
+            "Resumo do Incidente (IA): As correntes estão fracas neste ponto. Em "
+            f"{horas} horas, a mancha de óleo e o navio se moveram apenas {_br(drift_km)} km."
         )
 
     return {
@@ -787,6 +1086,142 @@ def prever_cardumes(lat, lon, raio_km=300.0):
     return {"origin": {"lat": lat, "lon": lon}, "raio_km": raio_km, "hotspots": top}
 
 
+# ---------------- camada global de cardumes (zonas de ressurgência e pesca) ----------------
+# Cada zona: caixa (lat/lon), corrente/sistema, espécie provável, temperatura ótima e tolerância
+# da espécie (°C), se é ressurgência costeira (água mais fria que o entorno = nutrientes), peso de
+# produtividade (prior da literatura: Humboldt é o sistema mais produtivo do planeta) e escala de
+# biomassa ILUSTRATIVA por foco (t) — o modelo não tem dados de estoque pesqueiro.
+FISH_ZONES = [
+    {"zone": "Costa do Peru / Chile", "system": "Corrente de Humboldt", "lat": (-42, -5), "lon": (-82, -70),
+     "species": "Anchoveta-peruana", "t_opt": 17.0, "t_sd": 4.0, "upwelling": True, "prior": 1.0, "biomass": 180000},
+    {"zone": "Costa da Namíbia / África do Sul", "system": "Corrente de Benguela", "lat": (-35, -15), "lon": (8, 19),
+     "species": "Sardinha-sul-africana", "t_opt": 16.0, "t_sd": 4.0, "upwelling": True, "prior": 0.9, "biomass": 90000},
+    {"zone": "Costa Marroquina / Canárias", "system": "Corrente das Canárias", "lat": (15, 36), "lon": (-21, -9),
+     "species": "Sardinha-europeia", "t_opt": 18.0, "t_sd": 4.0, "upwelling": True, "prior": 0.85, "biomass": 70000},
+    {"zone": "Pacífico Norte / Califórnia", "system": "Corrente da Califórnia", "lat": (25, 48), "lon": (-130, -116),
+     "species": "Anchova-do-Pacífico", "t_opt": 15.0, "t_sd": 4.0, "upwelling": True, "prior": 0.8, "biomass": 60000},
+    {"zone": "Atlântico Norte / Grand Banks", "system": "Corrente do Labrador", "lat": (40, 52), "lon": (-58, -44),
+     "species": "Bacalhau-do-Atlântico", "t_opt": 7.0, "t_sd": 6.0, "upwelling": False, "prior": 0.7, "biomass": 45000},
+    {"zone": "Atlântico Norte / Mar do Norte", "system": "Corrente do Atlântico Norte", "lat": (51, 61), "lon": (-3, 9),
+     "species": "Arenque-do-Atlântico", "t_opt": 11.0, "t_sd": 5.0, "upwelling": False, "prior": 0.75, "biomass": 55000},
+    {"zone": "Índico / Golfo de Bengala", "system": "Monção do Golfo de Bengala", "lat": (5, 22), "lon": (80, 95),
+     "species": "Atum-gaiado (bonito-listrado)", "t_opt": 28.0, "t_sd": 3.0, "upwelling": False, "prior": 0.6, "biomass": 30000},
+    {"zone": "Índico Equatorial", "system": "Contracorrente Equatorial Sul", "lat": (-10, 8), "lon": (50, 95),
+     "species": "Albacora-laje (atum)", "t_opt": 28.0, "t_sd": 3.0, "upwelling": False, "prior": 0.55, "biomass": 25000},
+]
+FISH_PER_ZONE = 4        # focos por zona
+FISH_MIN_SPACING = 3.0   # graus entre focos da mesma zona (evita empilhar no mesmo lugar)
+_fish_cache = None
+
+
+def generate_global_fish_hotspots(grid_data=None):
+    """Hotspots globais de cardume a partir da matriz de correntes e temperatura do mar.
+    Em cada zona de ressurgência/pesca, pontua as células de água (1°) por:
+      - frente térmica: gradiente de SST (°C/grau) — onde águas se encontram e o plâncton concentra;
+      - ressurgência: água mais fria que a média da zona (só nas zonas costeiras de ressurgência);
+      - adequação térmica: gaussiana em volta da temperatura ótima da espécie provável;
+      - corrente desacelerada: fluxo lento favorece agregação (divide pela velocidade).
+    Escolhe os melhores focos espaçados de cada zona e normaliza a intensidade 0–1 no globo.
+    grid_data: (grade_de_correntes, grade_de_sst) opcional; por padrão, os dados carregados."""
+    global _fish_cache
+    if grid_data is None and _fish_cache is not None:
+        return _fish_cache
+    cur, sst = grid_data if grid_data else (get_current_grid(), get_sst_grid())
+    mask = _build_nav_mask()
+
+    def water(lon, lat):
+        a = int(round((90.0 - lat) / NAV_RES))
+        o = int(round((lon + 180.0) / NAV_RES)) % NAV_NLON
+        return 0 <= a < NAV_NLAT and bool(mask[a * NAV_NLON + o])
+
+    def temp(lon, lat):
+        return sst.sample(lon, lat) if sst else None
+
+    picked = []
+    for z in FISH_ZONES:
+        cells = []
+        for lat in range(int(z["lat"][0]), int(z["lat"][1]) + 1):
+            for lon in range(int(z["lon"][0]), int(z["lon"][1]) + 1):
+                t0 = temp(lon, lat)
+                if t0 is None or not water(lon, lat):
+                    continue
+                cells.append((lon, lat, t0))
+        if not cells:
+            continue
+        mean_t = sum(c[2] for c in cells) / len(cells)
+
+        scored = []
+        for lon, lat, t0 in cells:
+            te, tw = temp(lon + 1, lat), temp(lon - 1, lat)
+            tn, ts = temp(lon, lat + 1), temp(lon, lat - 1)
+            gx = abs((te if te is not None else t0) - (tw if tw is not None else t0)) / 2
+            gy = abs((tn if tn is not None else t0) - (ts if ts is not None else t0)) / 2
+            front = min(1.0, math.hypot(gx, gy) / 1.5)  # 1,5 °C/grau já é frente forte
+            cold = min(1.0, max(0.0, mean_t - t0) / 4.0) if z["upwelling"] else 0.0
+            fit = math.exp(-((t0 - z["t_opt"]) ** 2) / (2 * z["t_sd"] ** 2))
+            u, v = cur.sample(lon, lat)
+            speed_kn = math.hypot(u, v) * 1.94384
+            calm = 1.0 / (1.0 + speed_kn)
+            score = (0.4 * front + 0.3 * cold + 0.3 * fit) * (0.6 + 0.4 * calm) * z["prior"]
+            scored.append({"lon": lon, "lat": lat, "t": t0, "score": score, "front": front,
+                           "cold": cold, "fit": fit, "speed_kn": speed_kn})
+
+        scored.sort(key=lambda c: -c["score"])
+        chosen = []
+        for c in scored:
+            if all(math.hypot(c["lon"] - k["lon"], c["lat"] - k["lat"]) >= FISH_MIN_SPACING for k in chosen):
+                chosen.append(c)
+            if len(chosen) == FISH_PER_ZONE:
+                break
+        for c in chosen:
+            c["z"] = z
+        picked.extend(chosen)
+
+    if not picked:
+        _fish_cache = {"hotspots": [], "zones": []}
+        return _fish_cache
+
+    top = max(c["score"] for c in picked) or 1.0
+    hotspots = []
+    for c in picked:
+        z = c["z"]
+        intensity = round(0.25 + 0.75 * c["score"] / top, 3)
+        biomass = int(round(intensity * z["biomass"], -2))
+        motivos = []
+        if c["front"] >= 0.3:
+            motivos.append("frente térmica marcada")
+        if c["cold"] >= 0.25:
+            motivos.append("água fria de ressurgência")
+        if c["fit"] >= 0.6:
+            motivos.append(f"temperatura ideal para {z['species'].lower()}")
+        if c["speed_kn"] < 0.5:
+            motivos.append("corrente desacelerada (agregação)")
+        motivo_txt = ", ".join(motivos) if motivos else "sinal moderado de produtividade"
+        hotspots.append({
+            "lat": float(c["lat"]), "lon": float(c["lon"]),
+            "intensity": intensity,
+            "score": intensity,  # compatível com a camada antiga do mapa
+            "species": z["species"],
+            "temp_c": round(c["t"], 1),
+            "biomass_t": biomass,
+            "radius_km": round(70 + 110 * intensity),
+            "zone": z["zone"],
+            "system": z["system"],
+            "current_kn": round(c["speed_kn"], 2),
+            "row": [float(c["lat"]), float(c["lon"]), intensity, z["species"], round(c["t"], 1), biomass],
+            "title": "ZONA DE ALTA PRODUTIVIDADE BIOLÓGICA",
+            "explanation": (
+                f"{z['system']} ({z['zone']}): {motivo_txt}. SST {c['t']:.1f}°C, corrente "
+                f"~{c['speed_kn']:.1f} nós."
+            ),
+        })
+    hotspots.sort(key=lambda h: -h["intensity"])
+    result = {"hotspots": hotspots, "zones": [z["zone"] for z in FISH_ZONES]}
+    if grid_data is None:
+        _fish_cache = result
+    return result
+
+
 # ============================================================
 # LLM (Gemini / OpenAI) via REST cru + roteamento de ferramentas em JSON
 # ============================================================
@@ -814,16 +1249,19 @@ def _extract_json(text):
     return m.group(0) if m else text
 
 
-# Modelos tentados em ordem. "gemini-3.6-flash" vem primeiro porque foi o que a própria
-# API do Google indicou (no erro 404 do 2.5-flash) e o único que já respondeu com sucesso
-# com esta chave; os demais ficam como fallback.
-MODELOS_GEMINI = ["gemini-3.6-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"]
+# Modelos tentados em ordem (nome exato do endpoint REST v1beta: models/<nome>:generateContent).
+# Um modelo que responder 404 é descartado nesta execução e o próximo é tentado.
+MODELOS_GEMINI = [
+    "gemini-flash-latest",
+    "gemini-3.8-flash",
+    "gemini-flash-lite-latest",
+]
 # 404 = modelo inexistente/aposentado, 429 = cota, 5xx = sobrecarga, None = timeout/rede:
 # nesses casos vale tentar o próximo modelo. 400/401/403 (chave ou pedido inválido)
 # falhariam igual em todos, então paramos na hora.
 _GEMINI_RETRY_STATUS = {404, 429, 500, 502, 503, 504, None}
-LLM_TIMEOUT_S = 10          # por modelo
-LLM_TOTAL_BUDGET_S = 20     # somando todas as tentativas — a interface nunca espera mais que isso
+LLM_TIMEOUT_S = 20          # por modelo (evita "read operation timed out" em respostas longas)
+LLM_TOTAL_BUDGET_S = 45     # somando todas as tentativas — a interface nunca espera mais que isso
 _gemini_dead = set()        # modelos que deram 404: não insiste neles de novo nesta execução
 _gemini_last_ok = None      # último que funcionou: tentado primeiro na próxima chamada
 
@@ -841,9 +1279,12 @@ def _call_gemini(body_text, gem_key):
         if restante < 2:
             print("[GEMINI] tempo total esgotado — usando a simulação otimizada.")
             return None
+        model_id = model_name.strip().removeprefix("models/")
         url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{model_name}:generateContent?key={gem_key}")
+               f"{model_id}:generateContent")
+        # chave no cabeçalho (e não na URL), para não vazar em logs/mensagens de erro
         res = _http_post_json(url, {"contents": [{"parts": [{"text": body_text}]}]},
+                              headers={"x-goog-api-key": gem_key},
                               timeout=min(LLM_TIMEOUT_S, restante))
         if "_error" in res:
             status = res.get("_status")
@@ -940,7 +1381,7 @@ def llm_chat(message, context=None, history=None):
         result = simular_vazamento(lat, lon, volume, horas)
         last = result["frames"][-1]
         reply = (
-            "🚨 Simulei o vazamento de %.0ft em (%.2f, %.2f) por %dh. A mancha derivou %.1f NM "
+            "Simulei o vazamento de %.0ft em (%.2f, %.2f) por %dh. A mancha derivou %.1f NM "
             "(%.1f nós médios) até (%.2f, %.2f), raio final ~%.1f km."
             % (volume, lat, lon, horas, result["drift_nm"], result["drift_speed_kn"],
                last["lat"], last["lon"], last["radius_km"])
@@ -951,7 +1392,7 @@ def llm_chat(message, context=None, history=None):
         raio = float(args.get("raio_km", 300))
         result = prever_cardumes(lat, lon, raio)
         reply = (
-            "🐟 Encontrei %d zona(s) de provável concentração de cardumes num raio de %.0f km a "
+            "Encontrei %d zona(s) de provável concentração de cardumes num raio de %.0f km a "
             "partir de (%.2f, %.2f) — frentes de convergência/divergência térmica das correntes."
             % (len(result["hotspots"]), raio, lat, lon)
         )
@@ -971,7 +1412,7 @@ def _fallback_chat(message, context):
             return {"reply": "Aponte pra um ponto do mapa primeiro (ou informe lat/lon) e peça de novo.",
                     "tool": None, "data": None}
         result = simular_vazamento(lat, lon, 500, 24)
-        return {"reply": "🚨 (modo sem LLM) Simulação de vazamento de 500t por 24h a partir do ponto atual, "
+        return {"reply": "(modo sem LLM) Simulação de vazamento de 500t por 24h a partir do ponto atual, "
                           "seguindo as correntes locais.", "tool": "simular_vazamento", "data": result}
 
     if "cardum" in low or "peixe" in low or "pesca" in low:
@@ -979,7 +1420,7 @@ def _fallback_chat(message, context):
             return {"reply": "Aponte pra um ponto do mapa primeiro (ou informe lat/lon) e peça de novo.",
                     "tool": None, "data": None}
         result = prever_cardumes(lat, lon, 300)
-        return {"reply": "🐟 (modo sem LLM) Zonas de frente térmica/de corrente identificadas perto do "
+        return {"reply": "(modo sem LLM) Zonas de frente térmica/de corrente identificadas perto do "
                           "ponto atual.", "tool": "prever_cardumes", "data": result}
 
     return {"reply": "Copiloto em modo offline — defina GEMINI_API_KEY ou OPENAI_API_KEY no ambiente pra "

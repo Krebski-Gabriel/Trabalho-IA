@@ -105,8 +105,16 @@ const brctx = bordersCanvas.getContext('2d');
 let bordersReady = false;
 let particles = [];
 let showSST = false, showCurr = true, showGrat = true, showNavRoutes = true, showPorts = false;
+let showRouteLines = true;  // linhas das 3 rotas (comercial, A*, Copiloto IA)
+// visibilidade INDEPENDENTE de cada camada de simulação (antes era uma chave só para as duas)
+let showSpillLayer = true;  // mancha de vazamento + trajeto de deriva
+let showFishLayer = true;   // focos/calor de cardumes
 const PORTS = (window.GLOBAL_PORTS_DATA || []);
 const PORT_BY_ID = new Map(PORTS.map((p) => [p.id, p]));
+// posição náutica do porto (na água do mapa): onde o marcador é desenhado e a rota começa/termina
+function portLL(p) {
+  return p.approachLon != null ? [p.approachLon, p.approachLat] : [p.lon, p.lat];
+}
 /* LOD (Level of Detail): quanto maior minZ, mais perto é preciso dar zoom
    pra o porto aparecer — Z=1 é o mundo inteiro na tela. */
 const PORT_SIZE_META = {
@@ -1156,6 +1164,8 @@ function drawBase() {
     bctx.stroke();
   }
 
+  drawScenarioOverlay();
+
   if (!panning) {
     labelRects = [];
     drawCountryLabels();
@@ -1166,8 +1176,8 @@ function drawBase() {
   if (showPorts) drawPorts();
   else portScreenPos = [];
 
-  drawOilSpill();
-  drawFishHeatmap();
+  if (showFishLayer) drawFishHeatmap();
+  if (showSpillLayer) drawOilSpill();
 }
 
 /* ---------- camada de simulação: mancha de vazamento de óleo (Copiloto IA) ---------- */
@@ -1288,6 +1298,16 @@ function drawOilSpill() {
   bctx.strokeStyle = 'rgba(255,95,70,0.9)';
   bctx.lineWidth = 1.2;
   bctx.stroke();
+  // isolinhas de densidade: círculos concêntricos a 66% e 33% do raio (óleo mais espesso no centro)
+  bctx.setLineDash([4, 4]);
+  for (const k of [0.66, 0.33]) {
+    bctx.beginPath();
+    bctx.ellipse(eL[0], eL[1], eL[2] * k, eL[3] * k, 0, 0, Math.PI * 2);
+    bctx.strokeStyle = 'rgba(255,140,110,' + (0.45 + 0.4 * (1 - k)).toFixed(2) + ')';
+    bctx.lineWidth = 1;
+    bctx.stroke();
+  }
+  bctx.setLineDash([]);
 
   // trajeto pontilhado da deriva: origem -> posição a cada hora
   traceLL([origin].concat(frames.map((f) => [f.lon, f.lat])));
@@ -1319,35 +1339,198 @@ function drawOilSpill() {
   }
 }
 
-/* ---------- camada de simulação: heatmap de cardumes (Copiloto IA) ---------- */
+/* ---------- cenário geopolítico no mapa: canais bloqueados ---------- */
+function drawScenarioOverlay() {
+  for (const key of ['panama', 'suez']) {
+    if (!navScenario['block_' + key]) continue;
+    const [lat, lon, name] = CANAL_MARKERS[key];
+    const s = project(lon, lat);
+    bctx.beginPath();
+    bctx.arc(s[0], s[1], 9, 0, Math.PI * 2);
+    bctx.fillStyle = '#d61f1f';
+    bctx.shadowColor = 'rgba(255,40,20,0.9)';
+    bctx.shadowBlur = 10;
+    bctx.fill();
+    bctx.shadowBlur = 0;
+    bctx.strokeStyle = '#fff';
+    bctx.lineWidth = 1.6;
+    bctx.stroke();
+    bctx.beginPath(); // barra de "proibido"
+    bctx.moveTo(s[0] - 5, s[1]);
+    bctx.lineTo(s[0] + 5, s[1]);
+    bctx.lineWidth = 2.4;
+    bctx.stroke();
+    drawMapTag(name + ' bloqueado', s[0] + 13, s[1] - 1, '#ffb3a8');
+  }
+}
+
+/* ---------- camada de cardumes: focos globais graduados (heatmap em canvas) ---------- */
+function fishRadiusPx(h) {
+  // focos globais têm raio em km (acompanha o zoom); os do chat antigo, raio fixo em px
+  return h.radius_km ? Math.max(8 + 6 * h.score, (h.radius_km / 111) * scaleK) : 16 + h.score * 30;
+}
+
+// cor por intensidade: ciano (0,25) -> verde-néon -> amarelo-limão (1,0)
+function fishColor(i) {
+  const t = Math.max(0, Math.min(1, (i - 0.25) / 0.75));
+  const r = Math.round(t < 0.5 ? 60 + 140 * t : 130 + 200 * (t - 0.5));
+  const g = 255;
+  const b = Math.round(230 - 190 * t);
+  return r + ',' + g + ',' + b;
+}
+
 function drawFishHeatmap() {
   if (!fishHotspots || !fishHotspots.hotspots || !fishHotspots.hotspots.length) return;
-  for (const h of fishHotspots.hotspots) {
+  const hs = fishHotspots.hotspots;
+  // 1) calor: gradientes somados com 'lighter' — focos vizinhos se fundem numa mancha contínua
+  bctx.save();
+  bctx.globalCompositeOperation = 'lighter';
+  for (const h of hs) {
     const s = project(h.lon, h.lat);
-    const r = 16 + h.score * 30;
+    const r = fishRadiusPx(h) * 1.6;
+    const col = fishColor(h.score);
     const g = bctx.createRadialGradient(s[0], s[1], 0, s[0], s[1], r);
-    g.addColorStop(0, 'rgba(90,255,195,' + (0.55 * h.score + 0.15).toFixed(3) + ')');
-    g.addColorStop(1, 'rgba(90,255,195,0)');
+    g.addColorStop(0, 'rgba(' + col + ',' + (0.2 + 0.45 * h.score).toFixed(3) + ')');
+    g.addColorStop(0.55, 'rgba(' + col + ',' + (0.08 + 0.18 * h.score).toFixed(3) + ')');
+    g.addColorStop(1, 'rgba(' + col + ',0)');
     bctx.fillStyle = g;
     bctx.beginPath();
     bctx.arc(s[0], s[1], r, 0, Math.PI * 2);
     bctx.fill();
   }
+  bctx.restore();
+  // 2) círculo graduado + núcleo: deixa cada foco legível e clicável
+  for (const h of hs) {
+    const s = project(h.lon, h.lat);
+    const r = fishRadiusPx(h);
+    const col = fishColor(h.score);
+    bctx.beginPath();
+    bctx.arc(s[0], s[1], r, 0, Math.PI * 2);
+    bctx.strokeStyle = 'rgba(' + col + ',0.75)';
+    bctx.lineWidth = 1.2;
+    bctx.setLineDash([3, 3]);
+    bctx.stroke();
+    bctx.setLineDash([]);
+    bctx.beginPath();
+    bctx.arc(s[0], s[1], 2.5 + 2 * h.score, 0, Math.PI * 2);
+    bctx.fillStyle = 'rgb(' + col + ')';
+    bctx.shadowColor = 'rgb(' + col + ')';
+    bctx.shadowBlur = 8;
+    bctx.fill();
+    bctx.shadowBlur = 0;
+  }
 }
 
 /* ---------- hover explicativo sobre as camadas de simulação (cardumes / vazamento e deriva) ---------- */
 function findFishHotspotAt(px, py) {
-  if (!fishHotspots || !fishHotspots.hotspots) return null;
+  if (!showFishLayer || !fishHotspots || !fishHotspots.hotspots) return null;
+  let best = null, bestD = Infinity;
   for (const h of fishHotspots.hotspots) {
     const s = project(h.lon, h.lat);
-    const r = 16 + h.score * 30;
-    if (Math.hypot(px - s[0], py - s[1]) <= r) return h;
+    const d = Math.hypot(px - s[0], py - s[1]);
+    if (d <= fishRadiusPx(h) && d < bestD) { best = h; bestD = d; }
   }
-  return null;
+  return best;
+}
+
+// distância (km) de um ponto até um traçado (aprox. plana local, suficiente para centenas de km)
+function distKmToPath(lat, lon, path) {
+  const kx = 111.32 * Math.cos(lat * Math.PI / 180), ky = 110.57;
+  let best = Infinity;
+  for (let i = 1; i < path.length; i++) {
+    const ax = (((path[i - 1][0] - lon + 540) % 360) - 180) * kx, ay = (path[i - 1][1] - lat) * ky;
+    const bx = (((path[i][0] - lon + 540) % 360) - 180) * kx, by = (path[i][1] - lat) * ky;
+    const dx = bx - ax, dy = by - ay;
+    const L2 = dx * dx + dy * dy;
+    const t = L2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / L2)) : 0;
+    best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy));
+  }
+  return best;
+}
+
+// orientação para a navegação em linguagem simples: a rota traçada passa por esta zona de cardumes?
+function fishNavAdvice(h) {
+  const radius = h.radius_km || 150;
+  const lines = [];
+  if (routeVariants && !routeIsEmergency && routeVariants.key === routeVariantsKey(routeA, routeB)) {
+    const names = { baseline: 'Comercial', astar: 'A*', llm: 'Copiloto IA' };
+    for (const k of ['baseline', 'astar', 'llm']) {
+      const p = routeVariants[k] && (routeVariants[k].drawPath || routeVariants[k].path);
+      if (p) lines.push([names[k], distKmToPath(h.lat, h.lon, p)]);
+    }
+  } else if (routePath && routePath.length > 1) {
+    lines.push([routeIsEmergency ? 'Emergência' : 'Rota atual', distKmToPath(h.lat, h.lon, routePath)]);
+  }
+  if (!lines.length) {
+    return 'Zona Rica em Vida Marinha, com muitos barcos de pesca e redes no mar. Redobre a atenção a colisões.';
+  }
+  const crossing = lines.filter(([, d]) => d <= radius).map(([n]) => n);
+  if (crossing.length) {
+    return 'A rota ' + crossing.join(', ') + ' passa por dentro desta Zona Rica em Vida Marinha. ' +
+      'Reduza a velocidade, cuidado com redes e barcos de pesca e não jogue nada no mar.';
+  }
+  const nearest = lines.reduce((a, b) => (b[1] < a[1] ? b : a));
+  return 'A rota ' + nearest[0] + ' passa a ' + Math.round(nearest[1] - radius).toLocaleString('pt-BR') +
+    ' km desta Zona Rica em Vida Marinha. Sem risco direto.';
+}
+
+function escHtmlFish(t) {
+  return String(t == null ? '' : t).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function fishWaterLabel(t) {
+  if (t < 18) return 'Água Fria';
+  if (t < 24) return 'Água Amena';
+  return 'Água Quente';
+}
+
+function fishConcentrationLabel(i) {
+  if (i >= 0.85) return 'Muito Alta';
+  if (i >= 0.65) return 'Alta';
+  if (i >= 0.45) return 'Média';
+  return 'Baixa';
+}
+
+// resumo em linguagem simples: por que os peixes estão ali e o que um vazamento causaria
+function fishPlainSummary(h) {
+  const why = (h.explanation || '').toLowerCase();
+  const calm = h.current_kn == null || h.current_kn < 0.5;
+  const water = fishWaterLabel(h.temp_c).toLowerCase();
+  const causes = [water + (calm ? ' e correntes calmas' : ' e correntes moderadas')];
+  if (why.indexOf('ressurg') >= 0) causes.push('água do fundo do mar subindo e trazendo alimento');
+  if (why.indexOf('frente') >= 0) causes.push('encontro de águas quentes e frias');
+  let txt = 'Esta região possui ' + causes.join(', ').replace(/, ([^,]*)$/, ' e $1') + ', ';
+  txt += why.indexOf('temperatura ideal') >= 0
+    ? 'criando o ambiente perfeito para grandes cardumes de ' + String(h.species).toLowerCase() + ' se reunirem.'
+    : 'o que atrai cardumes de ' + String(h.species).toLowerCase() + '.';
+  txt += h.intensity >= 0.65
+    ? ' Se houver um vazamento de óleo aqui, o impacto na pesca e na vida marinha será grave.'
+    : ' Um vazamento de óleo aqui também prejudicaria a pesca e a vida marinha.';
+  return txt;
+}
+
+// devolve HTML (todos os valores vindos dos dados passam por escHtmlFish)
+function fishPopupText(h) {
+  if (!h.species) {
+    return { title: 'ZONA RICA EM VIDA MARINHA', body: escHtmlFish(h.explanation || ''), html: true };
+  }
+  const pct = Math.round(h.intensity * 100);
+  return {
+    title: h.zone,
+    html: true,
+    body:
+      '<b>Peixe Principal:</b> ' + escHtmlFish(h.species) + '\n' +
+      '<b>Temperatura da Água:</b> ' + nf1(h.temp_c) + ' °C (' + fishWaterLabel(h.temp_c) + ')\n' +
+      '<b>Concentração de Peixes:</b> ' + fishConcentrationLabel(h.intensity) + ' (' + pct + '%)\n' +
+      '<b>Quantidade Estimada de Peixes:</b> ~' + h.biomass_t.toLocaleString('pt-BR') + ' toneladas\n' +
+      '<b>Alerta de Navegação:</b> ' + escHtmlFish(fishNavAdvice(h)) + '\n\n' +
+      '<b><i>Resumo da IA:</i></b>\n<i>' + escHtmlFish(fishPlainSummary(h)) + '</i>',
+  };
 }
 
 function findOilHoverAt(px, py) {
-  if (!oilSpill || !oilSpill.frames || !oilSpill.frames.length) return null;
+  if (!showSpillLayer || !oilSpill || !oilSpill.frames || !oilSpill.frames.length) return null;
   const frames = oilSpill.frames;
   let prev = project(oilSpill.origin.lon, oilSpill.origin.lat);
   for (let i = 0; i < frames.length; i++) {
@@ -1362,13 +1545,14 @@ function findOilHoverAt(px, py) {
   return null;
 }
 
-function showSimTooltip(mx, my, kind, title, body) {
+function showSimTooltip(mx, my, kind, title, body, isHtml) {
   const el = document.getElementById('sim-tooltip');
   if (!el) return;
   el.classList.toggle('is-fish', kind === 'fish');
   el.classList.toggle('is-oil', kind === 'oil');
   document.getElementById('sim-tt-title').textContent = title;
-  document.getElementById('sim-tt-body').textContent = body;
+  const bodyEl = document.getElementById('sim-tt-body');
+  if (isHtml) bodyEl.innerHTML = body; else bodyEl.textContent = body;
   el.style.left = mx + 'px';
   el.style.top = my + 'px';
   el.hidden = false;
@@ -1633,8 +1817,9 @@ function drawPorts() {
     const p = PORTS[i];
     const meta = portMeta(p);
     if (Z < meta.minZ) continue; // LOD: ainda não deu zoom suficiente pra este nível de porto
-    if (p.lon < vb.lon0 || p.lon > vb.lon1 || p.lat < vb.lat0 || p.lat > vb.lat1) continue;
-    const s = project(p.lon, p.lat);
+    const [plon, plat] = portLL(p);
+    if (plon < vb.lon0 || plon > vb.lon1 || plat < vb.lat0 || plat > vb.lat1) continue;
+    const s = project(plon, plat);
     if (s[0] < -10 || s[0] > W + 10 || s[1] < -10 || s[1] > H + 10) continue;
 
     portScreenPos.push({ x: s[0], y: s[1], port: p });
@@ -1677,6 +1862,137 @@ function findPortAt(x, y) {
   return best;
 }
 
+/* ---------- cartão de hover dos portos (com foto) ---------- */
+const portPhotoCache = new Map(); // id -> Promise<{src, credit} | null>
+
+function portSearchName(p) {
+  return p.name.split(' / ')[0].replace(/\s*\(.*?\)\s*/g, ' ').trim();
+}
+
+/* resumo de uma página da Wikipédia (API REST pública, com CORS): {src, credit} se houver foto,
+   null se a página não existe/não tem imagem, 'retry' se a falha foi passageira (429, rede, timeout) */
+async function wikiThumb(lang, title) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 5000);
+  try {
+    const url = 'https://' + lang + '.wikipedia.org/api/rest_v1/page/summary/' +
+      encodeURIComponent(title.replace(/ /g, '_'));
+    const r = await fetch(url, { signal: ctl.signal });
+    if (r.status === 429 || r.status >= 500) return 'retry';
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (j.type === 'disambiguation') return null;
+    const src = (j.thumbnail && j.thumbnail.source) || (j.originalimage && j.originalimage.source);
+    return src ? { src, credit: 'Foto: Wikipédia — ' + j.title } : null;
+  } catch (e) {
+    return 'retry';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* imageUrl do porto, se existir; senão a 1ª foto encontrada entre "Porto de X", a cidade X e
+   "Port of X" (inglês); senão null (o cartão fica com a ilustração gerada localmente) */
+function portPhoto(p) {
+  if (!portPhotoCache.has(p.id)) {
+    const base = portSearchName(p);
+    const job = p.imageUrl
+      ? Promise.resolve({ src: p.imageUrl, credit: 'Foto do porto' })
+      : (async () => {
+        let transient = false;
+        for (const [lang, title] of [['pt', 'Porto de ' + base], ['pt', base], ['en', 'Port of ' + base]]) {
+          const hit = await wikiThumb(lang, title);
+          if (hit === 'retry') { transient = true; continue; }
+          if (hit) return hit;
+        }
+        if (transient) portPhotoCache.delete(p.id); // falha passageira: tenta de novo no próximo hover
+        return null;
+      })();
+    portPhotoCache.set(p.id, job);
+  }
+  return portPhotoCache.get(p.id);
+}
+
+// ilustração SVG gerada no próprio navegador — garante imagem para 100% dos portos, offline inclusive
+function portPlaceholder(p) {
+  let h = 7;
+  for (const ch of p.id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const hue = 190 + (h % 40);
+  const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="220" viewBox="0 0 480 220">' +
+    '<defs><linearGradient id="s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="hsl(' + hue + ',55%,62%)"/>' +
+    '<stop offset="1" stop-color="hsl(' + hue + ',45%,84%)"/></linearGradient>' +
+    '<linearGradient id="w" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="hsl(' + (hue + 10) + ',60%,32%)"/>' +
+    '<stop offset="1" stop-color="hsl(' + (hue + 10) + ',65%,16%)"/></linearGradient></defs>' +
+    '<rect width="480" height="220" fill="url(#s)"/>' +
+    '<g fill="#1d2b36" opacity="0.85"><rect x="300" y="58" width="8" height="92"/><rect x="250" y="58" width="140" height="7"/>' +
+    '<rect x="345" y="65" width="4" height="40"/><rect x="392" y="80" width="7" height="70"/><rect x="352" y="80" width="110" height="6"/></g>' +
+    '<rect x="20" y="146" width="220" height="8" fill="#546e7a"/>' +
+    '<rect x="36" y="124" width="42" height="22" fill="#c0392b"/><rect x="80" y="124" width="42" height="22" fill="#2e86c1"/>' +
+    '<rect x="58" y="102" width="42" height="22" fill="#f1c40f"/><rect x="124" y="124" width="42" height="22" fill="#27ae60"/>' +
+    '<rect y="154" width="480" height="66" fill="url(#w)"/>' +
+    '<path d="M250 150 h180 l-20 26 h-142 z" fill="#263238"/><rect x="380" y="130" width="32" height="20" fill="#eceff1"/>' +
+    '<text x="18" y="206" font-family="Inter,Segoe UI,sans-serif" font-size="20" font-weight="700" fill="#fff">' +
+    esc(p.name) + '</text></svg>';
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+function onPortMouseOver(p) {
+  hoveredPort = p;
+  flowCanvas.classList.add('port-hover');
+  const el = portTooltipEl;
+  el.textContent = '';
+  el.classList.add('port-hover-card');
+
+  const img = document.createElement('img');
+  img.className = 'ph-img';
+  img.alt = 'Porto de ' + p.name;
+  img.src = portPlaceholder(p);
+  const body = document.createElement('div');
+  body.className = 'ph-body';
+  const add = (cls, txt) => {
+    const s = document.createElement('span');
+    s.className = cls;
+    s.textContent = txt;
+    body.appendChild(s);
+    return s;
+  };
+  add('pt-name', p.name);
+  add('pt-meta', p.country + ' · ' + p.type);
+  add('pt-meta', fmtCoord(p.lat, p.lon));
+  if (p.approachLon != null) {
+    const km = havKm(p.lon, p.lat, p.approachLon, p.approachLat);
+    add('pt-meta ph-approach', 'aproximação náutica: ' + fmtCoord(p.approachLat, p.approachLon) +
+      ' (' + Math.round(km).toLocaleString('pt-BR') + ' km)');
+  }
+  add('pt-size', p.size);
+  const credit = add('ph-credit', 'carregando foto…');
+  el.append(img, body);
+  el.hidden = false;
+
+  // se a URL falhar ao carregar, volta pra ilustração local
+  img.onerror = () => { img.onerror = null; img.src = portPlaceholder(p); credit.textContent = 'Ilustração'; };
+  portPhoto(p).then((ph) => {
+    if (hoveredPort !== p) return; // o cursor já saiu deste porto
+    if (ph) { img.src = ph.src; credit.textContent = ph.credit; } else credit.textContent = 'Ilustração (sem foto disponível)';
+  });
+}
+
+function onPortMouseOut() {
+  hoveredPort = null;
+  flowCanvas.classList.remove('port-hover');
+  portTooltipEl.hidden = true; // fecha na hora
+}
+
+function positionPortCard(mx, my) {
+  const el = portTooltipEl;
+  el.style.left = Math.max(128, Math.min(W - 128, mx)) + 'px';
+  el.style.top = my + 'px';
+  // perto do topo o cartão abre para baixo do cursor, pra não sair da tela
+  el.style.transform = my < 240 ? 'translate(-50%, 18px)' : 'translate(-50%, calc(-100% - 14px))';
+}
+
 /* ---------- menu de busca origem/destino (seleção de rota restrita a portos) ---------- */
 function populatePortSelectors() {
   const groups = ['Grande Hub', 'Porto Regional', 'Ancoradouro/Terminal'];
@@ -1715,18 +2031,14 @@ function routeFromSelectors() {
   routeMode = null;
   flowCanvas.classList.remove('picking');
   routeIsEmergency = false;
-  routeA = [pa.lon, pa.lat]; routeAPort = pa;
-  routeB = [pb.lon, pb.lat]; routeBPort = pb;
+  routeA = portLL(pa); routeAPort = pa;
+  routeB = portLL(pb); routeBPort = pb;
   computeRoute();
 }
 
 /* ---------- dimensionamento ---------- */
-/* shiftX (opcional): quanto a borda esquerda do mapa andou na tela (painel ☰ abrindo/fechando).
-   Com zoom aproximado o conteúdo fica parado na tela e só se revela/cobre a faixa lateral;
-   na vista do mundo inteiro o mapa reescala pra continuar preenchendo 100% da largura. */
-function resize(shiftX) {
+function resize() {
   const hadView = scaleK > 0;
-  const prevScale = scaleK, prevOX = originX, prevOY = originY;
   let cLon = 0, cLat = 0;
   if (hadView) { const c = invert(W / 2, H / 2); cLon = c[0]; cLat = c[1]; }
 
@@ -1747,11 +2059,6 @@ function resize(shiftX) {
     scaleK = baseK; Z = 1;
     originX = (W - 360 * scaleK) / 2;
     originY = (H - 180 * scaleK) / 2;
-  } else if (typeof shiftX === 'number' && prevScale >= baseK) {
-    scaleK = prevScale;
-    Z = scaleK / baseK;
-    originX = prevOX + shiftX;
-    originY = prevOY;
   } else {
     scaleK = baseK * Z;
     originX = W / 2 - (cLon + 180) * scaleK;
@@ -1821,13 +2128,102 @@ function buildNav() {
     NLON = OD.c.nlon;
     NLAT = OD.c.nlat;
   }
-  NAV = new Uint8Array(NLON * NLAT);
+  NAV_RAW = new Uint8Array(NLON * NLAT);
   for (let a = 0; a < NLAT; a++) {
     const lat = navLat(a);
     for (let o = 0; o < NLON; o++) {
-      NAV[navIdx(a, o)] = (Math.abs(lat) <= 84 && !isLandLL(navLon(o), lat)) ? 1 : 0;
+      NAV_RAW[navIdx(a, o)] = (Math.abs(lat) <= 84 && !isLandLL(navLon(o), lat)) ? 1 : 0;
     }
   }
+  applyNavScenario();
+}
+
+/* ---------- cenário de navegação (espelho de nav_mask_for em ai_agent.py) ----------
+   Na grade de 1° vários estreitos somem (isolando Báltico, Mar Negro, Mar Vermelho…) e o istmo
+   da América Central "vaza". Corredores de estreito ficam sempre abertos; os canais do Panamá e de
+   Suez abrem/fecham pelo cenário; o Ártico acima de 73°N fica fechado (gelo marinho). */
+const NAV_STRAITS = {
+  'Estreito de Dover': [[51, 2], [51, 1], [50, 1], [50, 0], [50, -1]],
+  'Estreito de Juan de Fuca': [[48, -123], [48, -124], [48, -125], [48, -126]],
+  'Estreitos dinamarqueses': [[58, 10], [57, 10], [57, 11], [56, 11], [56, 12], [55, 12], [55, 13], [55, 14], [55, 15], [55, 16]],
+  'Bósforo e Dardanelos': [[42, 29], [41, 29], [41, 28], [40, 28], [40, 27], [40, 26], [39, 26], [39, 25]],
+  'Mar Egeu': [[40, 23], [40, 24], [39, 24], [38, 24], [38, 25], [37, 25], [36, 25], [35, 25]],
+  'Bab-el-Mandeb': [[14, 42], [13, 42], [13, 43], [12, 43], [12, 44], [12, 45]],
+  'Estuário do São Lourenço': [[49, -68], [49, -67], [49, -66], [50, -66], [50, -65]],
+  'Golfo da Finlândia': [[58, 20], [59, 20], [59, 21], [59, 22], [59, 23], [59, 24], [60, 24], [60, 25], [60, 26], [60, 27], [60, 28]],
+  'Golfo de Honduras': [[16, -88], [16, -87], [16, -86], [17, -86], [17, -85], [17, -84]],
+  'Estreito de Malaca': [[6, 96], [6, 97], [5, 97], [5, 98], [4, 98], [4, 99], [3, 99], [3, 100], [2, 100], [2, 101], [2, 102], [1, 102], [1, 103], [1, 104], [1, 105]],
+};
+const NAV_CANALS = {
+  panama: [[12, -80], [11, -80], [10, -80], [9, -80], [9, -79], [8, -79], [7, -79], [6, -79]],
+  suez: [[31, 32], [30, 32], [29, 32], [29, 33], [28, 33], [27, 33], [27, 34]],
+};
+const CANAL_MARKERS = { panama: [9.1, -79.7, 'Canal do Panamá'], suez: [30.6, 32.35, 'Canal de Suez'] };
+const ISTHMUS_BOXES = [[7, 18.5, -95, -77.5]]; // lat0, lat1, lon0, lon1
+const ARCTIC_MAX_LAT = 73;
+let NAV_RAW = null;
+let navScenario = { block_panama: false, block_suez: false };
+
+function applyNavScenario() {
+  NAV = NAV_RAW.slice();
+  if (N_WRAP && NRES === 1) { // grade global de 1°: mesmas células do backend
+    const cellIdx = (lat, lon) => navIdx(Math.round(N_LAT0 - lat), (((Math.round(lon - N_LON0)) % NLON) + NLON) % NLON);
+    for (const [la0, la1, lo0, lo1] of ISTHMUS_BOXES) {
+      for (let lat = Math.ceil(la0); lat <= Math.floor(la1); lat++) {
+        for (let lon = Math.ceil(lo0); lon <= Math.floor(lo1); lon++) {
+          const a = Math.round(N_LAT0 - lat), o = (((Math.round(lon - N_LON0)) % NLON) + NLON) % NLON;
+          if (!NAV_RAW[navIdx(a, o)]) continue;
+          for (const [da, db] of NB8) {
+            if (!NAV_RAW[navIdx(a + da, (((o + db) % NLON) + NLON) % NLON)]) { NAV[navIdx(a, o)] = 0; break; }
+          }
+        }
+      }
+    }
+    const open = (cells) => cells.forEach(([lat, lon]) => { NAV[cellIdx(lat, lon)] = 1; });
+    Object.values(NAV_STRAITS).forEach(open);
+    if (!navScenario.block_panama) open(NAV_CANALS.panama);
+    if (!navScenario.block_suez) open(NAV_CANALS.suez);
+    for (let a = 0; a < NLAT; a++) {
+      if (navLat(a) > ARCTIC_MAX_LAT) NAV.fill(0, a * NLON, (a + 1) * NLON);
+    }
+  }
+  keepOceanOnly();
+}
+
+/* Mantém só o maior corpo d'água conectado (mesmas regras de movimento do aStar: 8 vizinhos,
+   diagonal sem cortar quina de terra). Lagos e mares fechados no contorno do mapa saem da grade,
+   então navSnap nunca "encaixa" um porto num ponto de onde o A* não consegue sair. */
+function keepOceanOnly() {
+  const N = NLON * NLAT;
+  const comp = new Int32Array(N);
+  const stack = new Int32Array(N);
+  let bestId = 0, bestSize = 0, cid = 0;
+  for (let s = 0; s < N; s++) {
+    if (!NAV[s] || comp[s]) continue;
+    cid++;
+    comp[s] = cid;
+    let top = 0, size = 0;
+    stack[top++] = s;
+    while (top) {
+      const cur = stack[--top];
+      size++;
+      const ca = (cur / NLON) | 0, co = cur % NLON;
+      for (let n = 0; n < 8; n++) {
+        const na = ca + NB8[n][0];
+        if (na < 0 || na >= NLAT) continue;
+        let no = co + NB8[n][1];
+        if (N_WRAP) no = ((no % NLON) + NLON) % NLON;
+        else if (no < 0 || no >= NLON) continue;
+        const ni = na * NLON + no;
+        if (!NAV[ni] || comp[ni]) continue;
+        if (NB8[n][0] !== 0 && NB8[n][1] !== 0 && (!NAV[ca * NLON + no] || !NAV[na * NLON + co])) continue;
+        comp[ni] = cid;
+        stack[top++] = ni;
+      }
+    }
+    if (size > bestSize) { bestSize = size; bestId = cid; }
+  }
+  for (let i = 0; i < N; i++) if (NAV[i] && comp[i] !== bestId) NAV[i] = 0;
 }
 
 function navSnap(lon, lat) {
@@ -1925,7 +2321,9 @@ class MinHeap {
 
 const NB8 = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
 
-function aStar(aS, oS, aG, oG, cw) {
+/* custom (opcional) = { cost(lon1,lat1,lon2,lat2), heur(kmRestantes) } troca o custo de tempo
+   por outro objetivo (ex.: combustível do Copiloto IA); aí o retorno traz `cost` em vez de `hours`. */
+function aStar(aS, oS, aG, oG, cw, custom) {
   const N = NLON * NLAT;
   const g = new Float64Array(N).fill(Infinity);
   const came = new Int32Array(N).fill(-1);
@@ -1933,9 +2331,11 @@ function aStar(aS, oS, aG, oG, cw) {
   const startI = navIdx(aS, oS), goalI = navIdx(aG, oG);
   const goalLon = navLon(oG), goalLat = navLat(aG);
   const maxGround = (SHIP.kn + 6) * KMH_PER_KN;
+  const edgeCost = custom ? custom.cost : (lo1, la1, lo2, la2) => edgeHours(lo1, la1, lo2, la2, SHIP.kn, cw);
+  const heur = custom ? custom.heur : (km) => km / maxGround;
   g[startI] = 0;
   const heap = new MinHeap();
-  heap.push(startI, havKm(navLon(oS), navLat(aS), goalLon, goalLat) / maxGround);
+  heap.push(startI, heur(havKm(navLon(oS), navLat(aS), goalLon, goalLat)));
 
   let guard = 0;
   while (heap.size) {
@@ -1957,13 +2357,13 @@ function aStar(aS, oS, aG, oG, cw) {
       if (NB8[n][0] !== 0 && NB8[n][1] !== 0) {
         if (!NAV[ca * NLON + no] || !NAV[na * NLON + co]) continue;
       }
-      const dt = edgeHours(clon, clat, navLon(no), navLat(na), SHIP.kn, cw);
-      if (!isFinite(dt)) continue;
-      const ng = g[cur] + dt;
+      const dc = edgeCost(clon, clat, navLon(no), navLat(na));
+      if (!isFinite(dc)) continue;
+      const ng = g[cur] + dc;
       if (ng < g[ni]) {
         g[ni] = ng;
         came[ni] = cur;
-        heap.push(ni, ng + havKm(navLon(no), navLat(na), goalLon, goalLat) / maxGround);
+        heap.push(ni, ng + heur(havKm(navLon(no), navLat(na), goalLon, goalLat)));
       }
     }
   }
@@ -1976,14 +2376,57 @@ function aStar(aS, oS, aG, oG, cw) {
     c = came[c];
   }
   path.reverse();
+  if (custom) return { path, cost: g[goalI] };
   return { path, hours: g[goalI] };
+}
+
+/* Rota 3 — Copiloto IA em 100% Eco (espelho de ai_astar_route em ai_agent.py):
+     Custo(aresta) = Combustível(v³) / consumo_horário_de_serviço
+   Combustível = t/h no piso de slow steaming (75% da velocidade) × horas do trecho
+   × ((v + k·c_contra)/v)³ × (1 + peso·c_través/v): foge ao máximo das correntes contrárias. */
+const AI_ADVERSE_WEIGHT = 1.5;
+const AI_CROSS_PENALTY = 0.8;
+const AI_MODE_LABEL = '100% Eco / Slow Steaming';
+
+function aiAStar(aS, oS, aG, oG) {
+  const vPlan = Math.max(6, SHIP.kn * ECO_ETA_FRAC);
+  const vs = vPlan * KMH_PER_KN;
+  const rate = fuelTonsPerHour(vPlan);
+  const rateService = fuelTonsPerHour(SHIP.kn);
+  const weight = AI_ADVERSE_WEIGHT;
+  const crossW = AI_CROSS_PENALTY;
+  const S = OD ? 3.6 : 2.0;
+  const cost = (lo1, la1, lo2, la2) => {
+    const latM = (la1 + la2) / 2;
+    const dLon = ((lo2 - lo1 + 540) % 360) - 180;
+    const dx = dLon * 111.32 * Math.cos(latM * Math.PI / 180);
+    const dy = (la2 - la1) * 110.57;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) return 0;
+    const f = sampleField(lo1 + dLon / 2, latM);
+    const cu = f[0] * S, cv = f[1] * S;
+    const cPar = (cu * dx + cv * dy) / len;
+    const cPerp = Math.sqrt(Math.max(0, cu * cu + cv * cv - cPar * cPar));
+    const avail = vs * vs - cPerp * cPerp;
+    if (avail <= 1) return Infinity;
+    const ground = Math.sqrt(avail) + cPar;
+    if (ground < 0.5) return Infinity;
+    const dt = len / ground;
+    const adverse = Math.pow((vs + weight * Math.max(0, -cPar)) / vs, 3);
+    const fuel = rate * dt * adverse * (1 + crossW * cPerp / vs);
+    return fuel / rateService;
+  };
+  const maxGround = vs + 6 * KMH_PER_KN;
+  const perKm = (rate / rateService) / maxGround; // penalidades >= 1: admissível
+  const r = aStar(aS, oS, aG, oG, 1, { cost, heur: (km) => perKm * km });
+  return r ? { path: r.path, hours: pathHours(r.path, SHIP.kn) } : null;
 }
 
 /* ---------- comparação das 3 abordagens (espelho de compute_three_routes em ai_agent.py) ----------
    Calculada no navegador assim que a rota é traçada; quando o servidor Python responde,
    os números dele (e a análise redigida pelo LLM) substituem estes. */
-const ETA_SLACK = 0.03;       // janela de atracação: até 3% após o A* (ou o ETA da rota comercial)
-const MIN_SPEED_FRAC = 0.75;  // piso de slow steaming
+const MIN_SPEED_FRAC = 0.60;  // piso do motor por trecho (60% da velocidade de serviço)
+const ECO_ETA_FRAC = 0.75;    // ETA-alvo 100% Eco = trajeto a 75% da velocidade de serviço
 const SPEED_STEP_KN = 0.25;
 
 // tempo REAL de um trecho já traçado (a corrente age mesmo que o planejamento a ignore)
@@ -2070,11 +2513,16 @@ function localAnalysis(comm, astar, ai) {
   const pct = comm.fuel_tons > 0 ? 100 * dFuel / comm.fuel_tons : 0;
   const eta = ai.hours - comm.hours;
   const etaTxt = eta < -0.05 ? 'chegando ' + nf1(-eta) + ' h antes da rota comercial'
-    : eta > 0.05 ? 'com ETA ' + nf1(eta) + ' h após a rota comercial (dentro da janela de atracação)'
+    : eta > 0.05 ? 'com ETA ' + nf1(eta) + ' h após a rota comercial'
     : 'mantendo o mesmo ETA da rota comercial';
-  return 'Análise técnica (cálculo local — servidor Python offline): o A* ganha ' +
+  const dKm = ai.km - astar.km;
+  const rotaTxt = Math.abs(dKm) > 1
+    ? 'traça um desvio próprio ' + nf1(Math.abs(dKm) * 0.539957) + ' NM ' + (dKm > 0 ? 'mais longo' : 'mais curto') +
+      ' que o A* para fugir de correntes contrárias e transversais'
+    : 'segue praticamente o mesmo corredor do A* (correntes fracas nesta travessia)';
+  return 'Análise técnica (prévia local — aguardando o parecer do Copiloto IA/Gemini, a tabela atualiza sozinha): o A* ganha ' +
     nf1(comm.hours - astar.hours) + ' h sobre a rota comercial explorando as correntes; o Copiloto ' +
-    'converte esse ganho em economia, variando a velocidade entre ' + nf1(ai.min_kn) + ' e ' +
+    rotaTxt + ', variando a velocidade entre ' + nf1(ai.min_kn) + ' e ' +
     nf1(ai.max_kn) + ' nós (média ' + nf1(ai.avg_kn) + ' nós, carga média ' + Math.round(ai.load_pct) +
     '% da potência de serviço) e reduzindo o motor em ' + Math.round(100 * ai.eco_share) +
     '% do trajeto. Resultado: −' + nf1(dFuel) + ' t de VLSFO (−' + Math.round(pct) + '%), −' +
@@ -2082,23 +2530,58 @@ function localAnalysis(comm, astar, ai) {
     ' a menos, ' + etaTxt + '.';
 }
 
-// astarRes e commRes: saídas cruas do aStar (com e sem correntes) entre os mesmos nós
-function buildRouteComparison(astarRes, commRes) {
+// astarRes / commRes / aiRes: saídas cruas das 3 buscas (tempo, distância, combustível) entre os mesmos nós
+function buildRouteComparison(astarRes, commRes, aiRes) {
   const kn = SHIP.kn, rate = fuelTonsPerHour(kn);
   const commHours = pathHours(commRes.path, kn);
   let a = astarRes;
   if (commHours < a.hours) a = { path: commRes.path, hours: commHours }; // A* nunca pior que a comercial
+  const aiPath = aiRes || a; // sem traçado próprio, o Copiloto usa o caminho do A*
   const comm = { path: commRes.path, km: pathKm(commRes.path), hours: commHours, fuel_tons: rate * commHours, service_kn: kn };
   const astar = { path: a.path, km: pathKm(a.path), hours: a.hours, fuel_tons: rate * a.hours, service_kn: kn };
-  const ai = Object.assign({ path: a.path }, optimizePower(a.path, kn, Math.max(commHours, a.hours * (1 + ETA_SLACK))));
+  // ETA-alvo da gestão de potência (100% Eco): até o piso de 75% da velocidade no trajeto inteiro
+  const eta = aiPath.hours / ECO_ETA_FRAC;
+  const ai = Object.assign({ path: aiPath.path },
+    optimizePower(aiPath.path, kn, eta));
   ai.rationale = localAnalysis(comm, astar, ai);
   return { baseline: comm, astar, llm: ai };
+}
+
+/* equivalente ao map.fitBounds(bounds, { padding }) do Leaflet neste mapa em canvas: enquadra o
+   traçado (e os portos das pontas) no meio da tela com `pad` px de margem, sem afastar além do mundo inteiro */
+function fitViewToPath(path, pad) {
+  if (!path || path.length < 2) return;
+  const lons = path.map((q) => normLon(q[0]));
+  let lo0 = Math.min(...lons), lo1 = Math.max(...lons);
+  if (lo1 - lo0 > 180) { lo0 = -180; lo1 = 180; } // cruza o antimeridiano: usa a largura toda
+  const lats = path.map((q) => q[1]);
+  const la0 = Math.min(...lats), la1 = Math.max(...lats);
+  const zmax = (OD && OD.regional) ? 120 : 16;
+  const inset = hudLeftInset(); // área livre ao lado do card aberto
+  const kFit = Math.min((W - inset - 2 * pad) / Math.max(lo1 - lo0, 0.5), (H - 2 * pad) / Math.max(la1 - la0, 0.5));
+  Z = Math.max(1, Math.min(zmax, kFit / baseK));
+  scaleK = Z * baseK;
+  originX = inset + (W - inset) / 2 - ((lo0 + lo1) / 2 + 180) * scaleK;
+  originY = H / 2 - (90 - (la0 + la1) / 2) * scaleK;
+  clampView();
+  updateProj();
+  fctx.clearRect(0, 0, W, H);
+  requestBase();
+}
+
+/* traçado de desenho: liga o ponto exato dos marcadores (routeA/routeB, na água) aos nós da
+   grade e suaviza — a linha sempre nasce e termina no marcador, sem cruzar o continente */
+function withEndpoints(path) {
+  const pts = path.slice();
+  if (routeA) pts.unshift([routeA[0], routeA[1]]);
+  if (routeB) pts.push([routeB[0], routeB[1]]);
+  return smoothPath(pts);
 }
 
 // suaviza os traçados só pra desenhar (o cálculo usa os nós crus do grafo)
 function prepareVariants(v) {
   for (const k of ['baseline', 'astar', 'llm']) {
-    if (v[k] && v[k].path && v[k].path.length > 1) v[k].drawPath = smoothPath(v[k].path);
+    if (v[k] && v[k].path && v[k].path.length > 1) v[k].drawPath = withEndpoints(v[k].path);
   }
   return v;
 }
@@ -2194,29 +2677,127 @@ function fmtDur(h) {
 }
 
 /* ---------- Copiloto IA: busca as 3 rotas (Padrão / A* Python / LLM) no backend ---------- */
+// a chave inclui o cenário: variantes calculadas com outros valores são ignoradas
 function routeVariantsKey(a, b) {
-  return (a && b) ? a[0].toFixed(3) + ',' + a[1].toFixed(3) + '|' + b[0].toFixed(3) + ',' + b[1].toFixed(3) : null;
+  if (!a || !b) return null;
+  return a[0].toFixed(3) + ',' + a[1].toFixed(3) + '|' + b[0].toFixed(3) + ',' + b[1].toFixed(3) +
+    '|' + (navScenario.block_panama ? 'P' : '') + (navScenario.block_suez ? 'S' : '');
+}
+
+let aiAnalysisPendingKey = null; // chave da rota cujo parecer da IA ainda está sendo gerado no servidor
+
+function refreshOpenAnalytics() {
+  const modal = document.getElementById('route-analytics');
+  if (modal && !modal.hidden) openRouteAnalytics();
+}
+
+/* ---------- Gemini direto do navegador (sem servidor: index.html aberto direto ou GitHub Pages) ----------
+   A chave fica só no localStorage deste navegador — nunca vai para o GitHub. */
+const GEMINI_KEY_STORE = 'copiloto_gemini_key';
+const BROWSER_GEMINI_MODELS = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-flash-lite-latest'];
+
+function getBrowserGeminiKey() {
+  let k = '';
+  try { k = (localStorage.getItem(GEMINI_KEY_STORE) || '').trim(); } catch (e) { /* sem storage */ }
+  // sem chave própria do visitante: usa a chave do projeto (config.js)
+  return k || String(window.COPILOTO_GEMINI_KEY || '').trim();
+}
+function setBrowserGeminiKey(k) {
+  try { if (k) localStorage.setItem(GEMINI_KEY_STORE, k.trim()); else localStorage.removeItem(GEMINI_KEY_STORE); } catch (e) { /* sem storage */ }
+}
+
+async function browserGeminiText(prompt) {
+  const apiKey = getBrowserGeminiKey();
+  if (!apiKey) return null;
+  for (const model of BROWSER_GEMINI_MODELS) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 20000);
+    try {
+      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + model +
+        ':generateContent?key=' + encodeURIComponent(apiKey), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        signal: ctl.signal,
+      });
+      if (!res.ok) {
+        console.warn('[Gemini navegador]', model, res.status, (await res.text()).slice(0, 300));
+        if (res.status === 400 || res.status === 401 || res.status === 403) return null; // chave inválida: não insiste
+        continue;
+      }
+      const j = await res.json();
+      const txt = j && j.candidates && j.candidates[0] && j.candidates[0].content &&
+        j.candidates[0].content.parts && j.candidates[0].content.parts[0].text;
+      if (txt && txt.trim()) return txt.trim();
+    } catch (e) {
+      console.warn('[Gemini navegador]', model, e && e.message);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+async function browserGeminiRationale(key) {
+  const v = routeVariants;
+  if (!v || v.key !== key || !v.baseline || !v.llm) return false;
+  const c = v.baseline, a = v.astar, ai = v.llm, NM = 0.539957;
+  const f1 = (x) => (isFinite(x) ? (+x).toFixed(1) : '?');
+  const origem = routeAPort ? routeAPort.name : 'origem', destino = routeBPort ? routeBPort.name : 'destino';
+  const prompt =
+    'Atue como um Especialista em Logística Marítima. Análise da rota ' + origem + ' -> ' + destino + ':\n' +
+    '- Rota Comercial (menor distância, velocidade constante): ' + f1(c.km * NM) + ' NM, ' + f1(c.hours) + ' h, ' + f1(c.fuel_tons) + ' t VLSFO.\n' +
+    '- A* (menor tempo com correntes): ' + f1(a.km * NM) + ' NM, ' + f1(a.hours) + ' h, ' + f1(a.fuel_tons) + ' t VLSFO.\n' +
+    '- Copiloto IA (100% Eco, potência ajustada por trecho entre ' + f1(ai.min_kn) + ' e ' + f1(ai.max_kn) + ' nós): ' +
+    f1(ai.km * NM) + ' NM, ' + f1(ai.hours) + ' h, ' + f1(ai.fuel_tons) + ' t VLSFO.\n' +
+    'Combustível a US$ 600/t e 3,114 t de CO2 por tonelada. Forneça um parecer técnico sucinto em português ' +
+    '(máximo 3 frases) destacando economia de combustível, emissões e impacto no ETA. Use só esses números.';
+  const txt = await browserGeminiText(prompt);
+  if (!txt || routeVariants !== v) return false;
+  v.llm.rationale = txt;
+  return true;
 }
 
 async function fetchRouteVariants(a, b) {
-  if (location.protocol === 'file:') return; // precisa do servidor local (python servidor.py)
   const key = routeVariantsKey(a, b);
   if (!key) return;
+  const useBrowserAi = !!getBrowserGeminiKey();
+  if (location.protocol === 'file:' && !useBrowserAi) return; // sem servidor e sem chave: fica o texto local
+  aiAnalysisPendingKey = key;
+  refreshOpenAnalytics(); // modal aberto: troca o texto antigo pela animação de carregamento
+  let serverAnswered = false;
   try {
+    if (location.protocol === 'file:') throw new Error('sem servidor');
     const res = await fetch('/api/route', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ a, b, speed_kn: SHIP.kn }),
+      body: JSON.stringify({
+        a, b, speed_kn: SHIP.kn, scenario: navScenario,
+        origin_name: routeAPort ? routeAPort.name : null,
+        dest_name: routeBPort ? routeBPort.name : null,
+      }),
     });
-    if (!res.ok) return;
+    if (!res.ok) throw new Error('servidor ausente'); // ex.: GitHub Pages (site estático)
     const data = await res.json();
+    serverAnswered = true;
     if (routeVariantsKey(routeA, routeB) !== key) return; // rota mudou enquanto a resposta chegava
     if (!data.llm || data.llm.service_kn !== SHIP.kn) return; // velocidade mudou no meio do caminho
     routeVariants = prepareVariants(Object.assign({ key, source: 'server' }, data));
+    if (!routeIsEmergency) writeRouteSummary(routeVariants);
     drawRoute();
-    const modal = document.getElementById('route-analytics');
-    if (modal && !modal.hidden) openRouteAnalytics(); // atualiza a tabela com os números/análise do servidor
-  } catch (e) { /* backend offline — mapa continua com a rota calculada no cliente */ }
+  } catch (e) {
+    // sem servidor Python: mapa continua com a rota calculada no cliente; se houver chave, o parecer vem do Gemini direto
+    if (!serverAnswered && useBrowserAi) {
+      try { await browserGeminiRationale(key); } catch (e2) { /* fica o texto local */ }
+    }
+  }
+  finally {
+    // sucesso ou falha: tira a animação e mostra o parecer final (do Gemini ou o texto local)
+    if (aiAnalysisPendingKey === key) {
+      aiAnalysisPendingKey = null;
+      refreshOpenAnalytics();
+    }
+  }
 }
 
 function computeRoute() {
@@ -2236,25 +2817,43 @@ function computeRoute() {
     return;
   }
 
-  routePath = smoothPath(res.path);
+  routePath = withEndpoints(res.path);
   const cmp = setClientComparison(s, gg, res);
-
-  let txt = '';
-  if (routeAPort && routeBPort) txt += routeAPort.name + ' → ' + routeBPort.name + '\n';
   if (cmp) {
-    const c = cmp.baseline, a = cmp.astar, ai = cmp.llm;
-    const pct = (x) => Math.round(100 * (c.fuel_tons - x) / c.fuel_tons);
-    txt += '1. Rota comercial\n  ' + fmtKm(c.km) + '  ·  ' + fmtDur(c.hours) + '  ·  ' + nf1(c.fuel_tons) + ' t\n';
-    txt += '2. A* (correntes)\n  ' + fmtKm(a.km) + '  ·  ' + fmtDur(a.hours) + '  ·  ' + nf1(a.fuel_tons) + ' t (−' + pct(a.fuel_tons) + '%)\n';
-    txt += '3. Copiloto IA (potência)\n  ' + nf1(ai.min_kn) + '–' + nf1(ai.max_kn) + ' nós  ·  ' + fmtDur(ai.hours) +
-           '  ·  ' + nf1(ai.fuel_tons) + ' t (−' + pct(ai.fuel_tons) + '%)';
+    writeRouteSummary(cmp);
   } else {
-    txt += 'A* (correntes)\n  ' + fmtKm(pathKm(routePath)) + '  ·  ' + fmtDur(res.hours);
+    routeInfoEl.textContent = 'A* (correntes)\n  ' + fmtKm(pathKm(routePath)) + '  ·  ' + fmtDur(res.hours);
   }
-  txt += '\n\nclique com o botão direito na linha da rota p/ análise detalhada';
-  routeInfoEl.textContent = txt;
+  fitViewToPath(routePath, 80);
   drawRoute();
   fetchRouteVariants(routeA, routeB);
+}
+
+function writeRouteSummary(cmp) {
+  const c = cmp.baseline, a = cmp.astar, ai = cmp.llm;
+  const pct = (x) => nf1(100 * (c.fuel_tons - x) / c.fuel_tons);
+  let txt = routeAPort && routeBPort ? routeAPort.name + ' → ' + routeBPort.name + '\n' : '';
+  txt += '1. Rota comercial\n  ' + fmtNm(c.km) + '  ·  ' + fmtDur(c.hours) + '  ·  ' + nf1(c.fuel_tons) + ' t\n';
+  txt += '2. A* (menor tempo)\n  ' + fmtNm(a.km) + '  ·  ' + fmtDur(a.hours) + '  ·  ' + nf1(a.fuel_tons) + ' t (−' + pct(a.fuel_tons) + '%)\n';
+  txt += '3. Copiloto IA (' + AI_MODE_LABEL + ')\n  ' + fmtNm(ai.km) + '  ·  ' +
+         fmtDur(ai.hours) + '  ·  ' + nf1(ai.fuel_tons) + ' t (−' + pct(ai.fuel_tons) + '%)';
+  const sc = scenarioText(cmp);
+  if (sc) txt += '\n\n' + sc;
+  txt += '\n\nclique com o botão direito na linha da rota p/ análise detalhada';
+  routeInfoEl.textContent = txt;
+}
+
+// custo do cenário geopolítico (vem do servidor, que compara com a rota de canais abertos)
+function scenarioText(v) {
+  const s = v && v.scenario;
+  if (!s) {
+    const on = navScenario.block_panama || navScenario.block_suez;
+    return on ? 'Cenário ativo — o custo extra em relação aos canais abertos é calculado pelo servidor (python servidor.py).' : '';
+  }
+  return s.label + ': ' + (s.extra_nm >= 0 ? '+' : '−') + Math.abs(Math.round(s.extra_nm)).toLocaleString('pt-BR') +
+    ' NM, ' + (s.extra_hours >= 0 ? '+' : '−') + fmtDur(Math.abs(s.extra_hours)) + ', ' +
+    (s.extra_fuel_tons >= 0 ? '+' : '−') + nf1(Math.abs(s.extra_fuel_tons)) + ' t VLSFO (US$ ' +
+    (s.extra_usd >= 0 ? '+' : '−') + Math.abs(s.extra_usd).toLocaleString('pt-BR') + ') no A* em relação aos canais abertos';
 }
 
 // rota comercial (A* sem correntes entre os mesmos nós) + perfil de potência, no cliente
@@ -2262,14 +2861,32 @@ function setClientComparison(s, gg, astarRes) {
   routeVariants = null;
   const comm = aStar(s[0], s[1], gg[0], gg[1], 0);
   if (!comm || comm.path.length < 2) return null;
-  const cmp = buildRouteComparison(astarRes, comm);
+  const cmp = buildRouteComparison(astarRes, comm, aiAStar(s[0], s[1], gg[0], gg[1]));
   routeVariants = prepareVariants(Object.assign({ key: routeVariantsKey(routeA, routeB), source: 'client' }, cmp));
   return cmp;
 }
 
+/* bloqueio de canais: refaz a grade de navegação e recalcula a rota atual */
+function onScenarioChange() {
+  applyNavScenario();
+  spillRouteCache.clear();
+  drawBase();
+  if (!routeA || !routeB) { drawRoute(); return; }
+  if (routeIsEmergency) computeEmergencyRoute(routeA[0], routeA[1]);
+  else computeRoute();
+}
+
 function handleMapClick(px, py) {
   if (emergencyMode) { handleEmergencyClick(px, py); return; }
-  if (!routeMode) return;
+  if (!routeMode) {
+    // clique/toque num foco de cardume abre o popup (no celular não existe hover)
+    const fish = findFishHotspotAt(px, py);
+    if (fish) {
+      const pop = fishPopupText(fish);
+      showSimTooltip(px, py, 'fish', pop.title, pop.body, pop.html);
+    }
+    return;
+  }
 
   /* modo normal: só aceita pontos válidos da lista de portos —
      nada de clicar no meio do oceano pra virar origem/destino */
@@ -2285,7 +2902,7 @@ function handleMapClick(px, py) {
   lastRouteClick = performance.now();
   routeIsEmergency = false;
   if (routeMode === 'A') {
-    routeA = [port.lon, port.lat]; routeAPort = port;
+    routeA = portLL(port); routeAPort = port;
     routeB = null; routeBPort = null; routePath = null;
     routeMode = 'B';
     routeInfoEl.textContent = 'Origem: ' + port.name + '. Agora clique no porto de destino.';
@@ -2295,7 +2912,7 @@ function handleMapClick(px, py) {
       routeInfoEl.textContent = 'Escolha um porto de destino diferente da origem.';
       return;
     }
-    routeB = [port.lon, port.lat]; routeBPort = port;
+    routeB = portLL(port); routeBPort = port;
     routeMode = null;
     flowCanvas.classList.remove('picking');
     computeRoute();
@@ -2304,7 +2921,7 @@ function handleMapClick(px, py) {
 
 /* ---------- Rota de Emergência: clique livre no oceano -> porto seguro mais próximo ---------- */
 function findNearestPorts(lon, lat, limit) {
-  const arr = PORTS.map((p) => ({ port: p, km: havKm(lon, lat, p.lon, p.lat) }));
+  const arr = PORTS.map((p) => { const q = portLL(p); return { port: p, km: havKm(lon, lat, q[0], q[1]) }; });
   arr.sort((a, b) => a.km - b.km);
   return limit ? arr.slice(0, limit) : arr;
 }
@@ -2313,7 +2930,13 @@ function setEmergencyMode(on) {
   emergencyMode = on;
   const btn = document.getElementById('r-emergency');
   const alertEl = document.getElementById('emg-alert');
-  if (btn) { btn.classList.toggle('active', on); btn.setAttribute('aria-pressed', String(on)); }
+  if (btn) {
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', String(on));
+    btn.textContent = on ? 'Desativar modo de emergência' : 'Calcular rota de emergência';
+  }
+  const dockBtn = document.getElementById('dock-emergency');
+  if (dockBtn) dockBtn.classList.toggle('is-live', on); // ponto vermelho no dock com o card fechado
   flowCanvas.classList.toggle('emergency', on);
 
   routeMode = null;
@@ -2328,7 +2951,7 @@ function setEmergencyMode(on) {
   if (!alertEl) return;
   if (on) {
     alertEl.hidden = false;
-    alertEl.textContent = '🚨 Modo de emergência ativo — clique em qualquer ponto do oceano para marcar a posição do navio em perigo.';
+    alertEl.textContent = 'Modo de emergência ativo — clique em qualquer ponto do oceano para marcar a posição do navio em perigo.';
   } else {
     alertEl.hidden = true;
   }
@@ -2341,7 +2964,7 @@ function handleEmergencyClick(px, py) {
   const alertEl = document.getElementById('emg-alert');
 
   if (isLandLL(lon, ll[1])) {
-    if (alertEl) alertEl.textContent = '🚨 Ponto em terra — clique dentro do oceano para marcar o navio em perigo.';
+    if (alertEl) alertEl.textContent = 'Ponto em terra — clique dentro do oceano para marcar o navio em perigo.';
     return;
   }
 
@@ -2349,7 +2972,7 @@ function handleEmergencyClick(px, py) {
   routeB = null; routeBPort = null; routePath = null;
   routeIsEmergency = true;
   drawRoute();
-  if (alertEl) alertEl.textContent = '🚨 Calculando o porto seguro mais próximo…';
+  if (alertEl) alertEl.textContent = 'Calculando o porto seguro mais próximo…';
   computeEmergencyRoute(lon, ll[1]);
 }
 
@@ -2358,26 +2981,28 @@ function computeEmergencyRoute(lon, lat) {
   routeVariants = null;
   const s = navSnap(lon, lat);
   if (!s || !NAV) {
-    if (alertEl) alertEl.textContent = '🚨 Ponto fora do oceano navegável — tente clicar em uma área de água.';
+    if (alertEl) alertEl.textContent = 'Ponto fora do oceano navegável — tente clicar em uma área de água.';
     return;
   }
 
   const candidates = findNearestPorts(lon, lat, 6);
   for (let i = 0; i < candidates.length; i++) {
     const port = candidates[i].port;
-    const gg = navSnap(port.lon, port.lat);
+    const q = portLL(port);
+    const gg = navSnap(q[0], q[1]);
     if (!gg) continue;
     const res = aStar(s[0], s[1], gg[0], gg[1]);
     if (res && res.path.length > 1) {
-      routePath = smoothPath(res.path);
-      routeB = [port.lon, port.lat]; routeBPort = port;
+      routeB = q; routeBPort = port;
+      routePath = withEndpoints(res.path);
       routeIsEmergency = true;
       const km = pathKm(routePath);
       const hOpt = res.hours;
       setClientComparison(s, gg, res); // só p/ a análise do botão direito — no mapa segue a linha vermelha
+      fitViewToPath(routePath, 90);
       if (alertEl) {
         alertEl.innerHTML =
-          '🚨 <strong>Rota de emergência traçada</strong><br>' +
+          '<strong>Rota de emergência traçada</strong><br>' +
           'Porto seguro mais próximo: <strong>' + port.name + '</strong> (' + port.country + ')<br>' +
           'Distância: ' + fmtNm(km) + ' · ' + fmtKm(km) + '<br>' +
           'Tempo estimado: ' + fmtDur(hOpt) + ' a ' + SHIP.kn + ' nós<br>' +
@@ -2391,7 +3016,7 @@ function computeEmergencyRoute(lon, lat) {
 
   routePath = null;
   routeB = null; routeBPort = null;
-  if (alertEl) alertEl.textContent = '🚨 Não foi possível traçar uma rota até um porto próximo a partir deste ponto.';
+  if (alertEl) alertEl.textContent = 'Não foi possível traçar uma rota até um porto próximo a partir deste ponto.';
   drawRoute();
 }
 
@@ -2471,70 +3096,91 @@ function powerColor(v, vmin, vmax, alpha) {
   return 'rgba(' + Math.round(140 - 80 * t) + ',255,' + Math.round(80 + 140 * t) + ',' + alpha.toFixed(2) + ')';
 }
 
-// Copiloto IA: mesmo caminho do A*, colorido trecho a trecho pela potência escolhida
-function drawPowerRoute(ai, alpha, dashed) {
+/* deslocamento paralelo de renderização (px de tela): onde a física obriga as 3 rotas a
+   passar pelo mesmo canal/estreito, elas aparecem lado a lado em vez de sobrepostas */
+const ROUTE_OFFSET_PX = { baseline: -6, astar: 0, llm: 6 };
+
+// projeta o traçado e o desloca `off` px pela normal local; brk[i] marca quebra no antimeridiano
+function offsetScreenPath(path, off) {
+  const raw = path.map((q) => project(q[0], q[1]));
+  const n = raw.length;
+  const brk = new Array(n).fill(false);
+  for (let i = 1; i < n; i++) brk[i] = Math.abs(raw[i][0] - raw[i - 1][0]) > W * 0.5;
+  const pts = off ? raw.map((p, i) => {
+    const ia = i > 0 && !brk[i] ? i - 1 : i;
+    const ib = i < n - 1 && !brk[i + 1] ? i + 1 : i;
+    const dx = raw[ib][0] - raw[ia][0], dy = raw[ib][1] - raw[ia][1];
+    const L = Math.hypot(dx, dy);
+    return L < 1e-6 ? p : [p[0] - (dy / L) * off, p[1] + (dx / L) * off];
+  }) : raw;
+  return { pts, brk };
+}
+
+function strokeScreenPath(sp, from, to) {
+  rctx.beginPath();
+  for (let i = from; i <= to; i++) {
+    const p = sp.pts[i];
+    if (i === from || sp.brk[i]) rctx.moveTo(p[0], p[1]); else rctx.lineTo(p[0], p[1]);
+  }
+  rctx.stroke();
+}
+
+// Copiloto IA: traçado próprio, deslocado em paralelo e colorido trecho a trecho pela potência
+function drawPowerRoute(ai, alpha) {
   const p = ai.drawPath || ai.path;
   if (!p || p.length < 2) return;
   const sp = ai.speeds || [];
   const kn = ai.service_kn || SHIP.kn, vmin = kn * MIN_SPEED_FRAC;
   const nDraw = p.length - 1, nSeg = Math.max(1, sp.length);
   const speedAt = (i) => (sp.length ? sp[Math.min(nSeg - 1, Math.floor(i * nSeg / nDraw))] : kn);
+  const scr = offsetScreenPath(p, ROUTE_OFFSET_PX.llm);
 
   rctx.lineJoin = 'round';
   rctx.lineCap = 'round';
-  if (!dashed) {
-    rctx.strokeStyle = 'rgba(255,255,255,0.6)';
-    rctx.lineWidth = 6;
-    strokeRoute(p);
-  }
-  rctx.setLineDash(dashed ? [10, 7] : []);
-  rctx.lineWidth = 3;
+  rctx.strokeStyle = 'rgba(4,20,24,0.55)';
+  rctx.lineWidth = 6.5;
+  strokeScreenPath(scr, 0, nDraw);
+  rctx.lineWidth = 3.4;
   rctx.shadowBlur = 10;
   let i = 0;
   while (i < nDraw) { // agrupa trechos seguidos de mesma potência num só stroke
     const v = speedAt(i);
     let j = i + 1;
     while (j < nDraw && speedAt(j) === v) j++;
-    rctx.beginPath();
-    let prev = project(p[i][0], p[i][1]);
-    rctx.moveTo(prev[0], prev[1]);
-    for (let k = i + 1; k <= j; k++) {
-      const s = project(p[k][0], p[k][1]);
-      if (Math.abs(s[0] - prev[0]) > W * 0.5) rctx.moveTo(s[0], s[1]); else rctx.lineTo(s[0], s[1]);
-      prev = s;
-    }
     const col = powerColor(v, vmin, kn, alpha);
     rctx.strokeStyle = col;
     rctx.shadowColor = col;
-    rctx.stroke();
+    strokeScreenPath(scr, i, j);
     i = j;
   }
   rctx.shadowBlur = 0;
-  rctx.setLineDash([]);
 }
 
 function drawRoute() {
   rctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   rctx.clearRect(0, 0, W, H);
 
-  if (haveRouteVariants()) {
+  if (!showRouteLines) {
+    // camada de linhas desligada no card Camadas: ficam só os pinos A/B
+  } else if (haveRouteVariants()) {
     const v = routeVariants;
     // 1. Rota comercial padrão — linha cinza tracejada (referência, sempre visível)
     rctx.setLineDash([6, 5]);
     rctx.lineJoin = 'round';
     rctx.lineCap = 'round';
-    rctx.strokeStyle = 'rgba(190,198,208,0.85)';
-    rctx.lineWidth = 1.6;
-    strokeRoute(v.baseline.drawPath || v.baseline.path);
+    rctx.strokeStyle = 'rgba(205,212,222,0.9)';
+    rctx.lineWidth = 1.8;
+    const bp = offsetScreenPath(v.baseline.drawPath || v.baseline.path, ROUTE_OFFSET_PX.baseline);
+    strokeScreenPath(bp, 0, bp.pts.length - 1);
     rctx.setLineDash([]);
 
-    // 2. A* (menor tempo com a matriz de correntes) — linha sólida azul metálico
+    // 2. A* (menor tempo com a matriz de correntes) — linha sólida azul metálico, no centro
     if (routeDisplayMode === 'astar' || routeDisplayMode === 'both') {
       drawEngineRoute(v.astar.drawPath || v.astar.path, '#4f7fc9', 2.6, false);
     }
-    // 3. Copiloto IA — néon pulsante colorido pela potência; tracejado sobre o A* no modo "ambas"
+    // 3. Copiloto IA — néon pulsante colorido pela potência, deslocado em paralelo
     if (routeDisplayMode === 'llm' || routeDisplayMode === 'both') {
-      drawPowerRoute(v.llm, 0.6 + 0.4 * Math.sin(pulsePhase), routeDisplayMode === 'both');
+      drawPowerRoute(v.llm, 0.75 + 0.25 * Math.sin(pulsePhase));
     }
   } else if (routePath && routePath.length > 1) {
     const routeColor = routeIsEmergency ? '#ff3b30' : MAP.route;
@@ -2592,6 +3238,7 @@ function isPointNearPath(px, py, tol, path) {
 }
 
 function isPointNearRoute(px, py, tol) {
+  if (!showRouteLines) return false;
   if (haveRouteVariants()) {
     const v = routeVariants;
     return ['baseline', 'astar', 'llm'].some((k) => v[k] && isPointNearPath(px, py, tol, v[k].drawPath || v[k].path));
@@ -2604,6 +3251,15 @@ function setRaCell(row, idx, text) {
   if (el) el.textContent = text;
 }
 
+function setRaCellDetail(row, idx, main, detail) {
+  const el = document.getElementById('ra3-' + row + '-' + idx);
+  if (!el) return;
+  el.textContent = main;
+  const sm = document.createElement('small');
+  sm.textContent = detail;
+  el.appendChild(sm);
+}
+
 // colunas 2 e 3 comparadas com a rota comercial padrão (coluna 1)
 function fillRaColumn(idx, m, base) {
   if (!m || !isFinite(m.hours)) {
@@ -2612,24 +3268,25 @@ function fillRaColumn(idx, m, base) {
   }
   const kn = m.service_kn || SHIP.kn;
   const fuel = (m.fuel_tons != null && isFinite(m.fuel_tons)) ? m.fuel_tons : fuelTonsPerHour(kn) * m.hours;
-  setRaCell('speed', idx, m.speeds
-    ? nf1(m.min_kn) + '–' + nf1(m.max_kn) + ' nós · média ' + nf1(m.avg_kn) + ' (carga ' + Math.round(m.load_pct) + '%)'
-    : nf1(kn) + ' nós constantes (carga 100%)');
+  const sog = m.hours > 0 ? m.km / m.hours / KMH_PER_KN : kn; // velocidade média sobre o fundo
+  setRaCellDetail('speed', idx, nf1(sog) + ' nós em média', m.speeds
+    ? 'motor a ' + Math.round(m.load_pct) + '% da força, variando conforme as correntes'
+    : 'velocidade constante · motor a 100% da força');
   setRaCell('dist', idx, fmtNm(m.km) + ' · ' + fmtKm(m.km));
   setRaCell('time', idx, fmtDur(m.hours) +
     (base && isFinite(base.hours) ? ' (' + (m.hours <= base.hours ? '−' : '+') + nf1(Math.abs(m.hours - base.hours)) + ' h)' : ''));
 
   if (idx === 0 || !base) {
-    setRaCell('fuel', idx, nf1(fuel) + ' t VLSFO');
-    setRaCell('co2', idx, nf1(fuel * CO2_PER_TON_FUEL) + ' t emitidas (ref.)');
-    setRaCell('cost', idx, 'US$ ' + Math.round(fuel * FUEL_PRICE_USD).toLocaleString('pt-BR') + ' (ref.)');
+    setRaCell('fuel', idx, nf1(fuel) + ' toneladas');
+    setRaCell('co2', idx, 'referência · ' + nf1(fuel * CO2_PER_TON_FUEL) + ' t emitidas');
+    setRaCell('cost', idx, 'referência · US$ ' + Math.round(fuel * FUEL_PRICE_USD).toLocaleString('pt-BR') + ' gastos');
     return;
   }
   const baseFuel = base.fuel_tons;
   const saved = Math.max(0, baseFuel - fuel);
   const pct = baseFuel > 0 ? (saved / baseFuel) * 100 : 0;
-  setRaCell('fuel', idx, nf1(fuel) + ' t (−' + nf1(pct) + '%)');
-  setRaCell('co2', idx, nf1(saved * CO2_PER_TON_FUEL) + ' t evitadas');
+  setRaCell('fuel', idx, nf1(fuel) + ' toneladas (−' + nf1(pct) + '%)');
+  setRaCell('co2', idx, nf1(saved * CO2_PER_TON_FUEL) + ' t a menos');
   setRaCell('cost', idx, 'US$ ' + Math.round(saved * FUEL_PRICE_USD).toLocaleString('pt-BR'));
 }
 
@@ -2656,10 +3313,31 @@ function openRouteAnalytics() {
   document.getElementById('ra-subtitle').textContent =
     (subtitle || (fmtCoord(routeA[1], routeA[0]) + ' → ' + fmtCoord(routeB[1], routeB[0]))) +
     ' · ' + nf1(SHIP.kn) + ' nós de serviço';
+  const scEl = document.getElementById('ra-scenario');
+  if (scEl) {
+    const t = scenarioText(v);
+    scEl.textContent = t;
+    scEl.hidden = !t;
+  }
 
-  document.getElementById('ra-rationale').textContent = v && v.llm && v.llm.rationale
-    ? '🧭 ' + v.llm.rationale
-    : '🧭 Não foi possível comparar as abordagens para este trajeto.';
+  const ratEl = document.getElementById('ra-rationale');
+  const waitingAi = aiAnalysisPendingKey && aiAnalysisPendingKey === routeVariantsKey(routeA, routeB) &&
+    !(v && v.source === 'server');
+  if (waitingAi) {
+    ratEl.setAttribute('aria-busy', 'true');
+    ratEl.innerHTML =
+      '<div id="ai-loading" class="ai-loading-container" role="status">' +
+        '<div class="spinner" aria-hidden="true"></div>' +
+        '<span>A IA está a analisar as correntes marítimas e a calcular a melhor rota...</span>' +
+      '</div>';
+  } else {
+    const loading = document.getElementById('ai-loading');
+    if (loading) loading.remove();
+    ratEl.removeAttribute('aria-busy');
+    ratEl.textContent = v && v.llm && v.llm.rationale
+      ? v.llm.rationale
+      : 'Não foi possível comparar as abordagens para este trajeto.';
+  }
 
   modal.hidden = false;
 }
@@ -2699,6 +3377,53 @@ function aiCurrentPoint() {
 const nf1 = (v) => v.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const COMPASS_PT = ['N', 'NE', 'L', 'SE', 'S', 'SO', 'O', 'NO'];
 function compassPt(deg) { return COMPASS_PT[Math.floor(((deg + 22.5) % 360) / 45)]; }
+const COMPASS_NAME = { N: 'Norte', NE: 'Nordeste', L: 'Leste', SE: 'Sudeste', S: 'Sul', SO: 'Sudoeste', O: 'Oeste', NO: 'Noroeste' };
+function compassName(pt) { return COMPASS_NAME[pt] || pt; }
+const KM_PER_NM = 1.852;
+
+// "Metade do caminho entre Santos e Nova York", "30% do caminho de Santos para Nova York"...
+function routeSpotText(label, frac) {
+  const parts = (label || '').split(' → ');
+  if (frac == null || parts.length !== 2) return label || '';
+  const [a, b] = parts;
+  const pct = Math.round(frac * 100);
+  if (pct <= 3) return 'Logo após sair de ' + a + ' (rumo a ' + b + ')';
+  if (pct >= 97) return 'Chegando a ' + b + ' (vindo de ' + a + ')';
+  if (Math.abs(pct - 50) <= 3) return 'Metade do caminho entre ' + a + ' e ' + b;
+  return pct + '% do caminho de ' + a + ' para ' + b;
+}
+
+// texto principal em destaque + coordenadas em letra pequena por baixo
+function setMetricWithSub(id, main, sub) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = main;
+  if (sub) {
+    const sm = document.createElement('small');
+    sm.className = 'ai-metric-sub';
+    sm.textContent = sub;
+    el.appendChild(sm);
+  }
+}
+
+// resumo do incidente em linguagem simples (balão do mapa)
+function driftSummaryText(hours, driftKm, compass, netKm, aground, groundedHour) {
+  const speedKmh = hours > 0 ? driftKm / hours : 0;
+  let t;
+  if (compass && driftKm > 0.5) {
+    t = 'Resumo do Incidente (IA): As correntes marítimas empurraram o navio e o óleo em direção ao ' +
+      compassName(compass) + ' a uma velocidade de ' + nf1(speedKmh) + ' km/h. Em ' + hours +
+      ' horas, a mancha de óleo e o navio foram levados por cerca de ' + Math.round(driftKm) + ' km';
+    t += (netKm != null && Math.abs(netKm - driftKm) > 0.15 * driftKm)
+      ? ', terminando a ' + Math.round(netKm) + ' km do ponto inicial do acidente.'
+      : ' longe do ponto inicial do acidente.';
+  } else {
+    t = 'Resumo do Incidente (IA): As correntes estão fracas neste ponto. Em ' + hours +
+      ' horas, a mancha de óleo e o navio se moveram apenas ' + nf1(driftKm) + ' km.';
+  }
+  if (aground) t += ' Atenção: a mancha chegou à costa depois de ' + groundedHour + ' horas.';
+  return t;
+}
 function normLon(lon) { return ((lon + 180) % 360 + 360) % 360 - 180; }
 
 function updateDriftMetrics() {
@@ -2708,29 +3433,40 @@ function updateDriftMetrics() {
   box.hidden = false;
   const s = oilSpill;
   const set = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
-  set('ai-drift-time', s.drift_hours + ' horas no mar (' + nf1(s.drift_hours / 24) + ' dias)');
-  set('ai-drift-dist', nf1(s.drift_nm) + ' NM');
-  set('ai-drift-speed', nf1(s.drift_speed_kn) + ' nós');
+  const days = s.drift_hours / 24;
+  set('ai-drift-time', s.drift_hours + ' horas' + (days >= 1 ? ' (' + nf1(days) + ' dias)' : ' (menos de 1 dia)'));
+  const driftKm = s.drift_km != null ? s.drift_km : s.drift_nm * KM_PER_NM;
+  set('ai-drift-dist', 'cerca de ' + Math.round(driftKm).toLocaleString('pt-BR') + ' km');
+  set('ai-drift-speed', nf1(s.drift_speed_kn * KM_PER_NM) + ' km/h');
+
+  // direção: só texto simples ("Para o Noroeste - 43 km no total"), sem vetores X/Y
+  const netKm = s.dx_km != null ? Math.hypot(s.dx_km, s.dy_km) : null;
+  const dirRow = document.getElementById('ai-drift-dir-row');
+  if (dirRow) dirRow.hidden = !s.drift_compass;
+  if (s.drift_compass) {
+    set('ai-drift-xy', 'Para o ' + compassName(s.drift_compass) + ' - ' +
+      Math.round(netKm != null ? netKm : driftKm).toLocaleString('pt-BR') + ' km no total');
+  }
 
   // campos extras só existem na simulação local (a resposta antiga do servidor não os traz)
   const local = s.dx_km != null;
   box.querySelectorAll('[data-opt]').forEach((el) => { el.hidden = !local; });
   if (local) {
-    set('ai-drift-xy',
-      'X ' + nf1(Math.abs(s.dx_km)) + ' km ' + (s.dx_km >= 0 ? 'L' : 'O') +
-      ' · Y ' + nf1(Math.abs(s.dy_km)) + ' km ' + (s.dy_km >= 0 ? 'N' : 'S') +
-      (s.drift_compass ? ' (rumo ' + s.drift_compass + ')' : ''));
     const r = s.frames[s.frames.length - 1].radius_km;
-    set('ai-drift-radius', nf1(r) + ' km (~' + Math.round(Math.PI * r * r).toLocaleString('pt-BR') + ' km²)');
-    set('ai-drift-origin',
-      (s.routeLabel ? s.routeLabel + (s.incident_frac != null ? ' · ' + Math.round(s.incident_frac * 100) + '%' : '') + ' — ' : '') +
-      fmtCoord(s.origin.lat, s.origin.lon));
-    set('ai-drift-ship', fmtCoord(s.final.lat, s.final.lon));
+    set('ai-drift-radius', nf1(r) + ' km de raio (área equivalente a ~' +
+      Math.round(Math.PI * r * r).toLocaleString('pt-BR') + ' km²)');
+    const spot = s.routeLabel ? routeSpotText(s.routeLabel, s.incident_frac) : 'Ponto escolhido no mapa';
+    setMetricWithSub('ai-drift-origin', spot, fmtCoord(s.origin.lat, s.origin.lon));
+    const where = s.aground ? 'Encalhado na costa, ' : '';
+    setMetricWithSub('ai-drift-ship', netKm > 0.5 && s.drift_compass
+      ? where + Math.round(netKm).toLocaleString('pt-BR') + ' km a ' + compassName(s.drift_compass) + ' do local do acidente'
+      : where + 'praticamente no mesmo local do acidente',
+      fmtCoord(s.final.lat, s.final.lon));
   }
   const ag = document.getElementById('ai-drift-aground');
   if (ag) {
     ag.hidden = !s.aground;
-    if (s.aground) ag.textContent = '⚠️ Atingiu a costa após ' + s.grounded_hour + ' h de deriva — risco de contaminação do litoral.';
+    if (s.aground) ag.textContent = 'Atingiu a costa após ' + s.grounded_hour + ' h de deriva — risco de contaminação do litoral.';
   }
 }
 
@@ -2744,7 +3480,7 @@ const spillRouteCache = new Map();
 function spillShipRoute(choice) {
   if (choice === 'current') {
     if (!routePath || routePath.length < 2) {
-      return { error: 'Trace uma rota em "Navegação" primeiro — ou escolha uma das rotas pré-definidas.' };
+      return { error: 'Trace uma rota no card "Rota & Comparação" primeiro — ou escolha uma das rotas pré-definidas.' };
     }
     const label = routeAPort && routeBPort ? routeAPort.name + ' → ' + routeBPort.name
       : (routeIsEmergency ? 'Rota de emergência' : 'Rota atual');
@@ -2755,7 +3491,8 @@ function spillShipRoute(choice) {
   const [ia, ib] = choice.split('|');
   const pa = PORT_BY_ID.get(ia), pb = PORT_BY_ID.get(ib);
   if (!pa || !pb) return { error: 'Porto não encontrado na base de portos.' };
-  const sA = navSnap(pa.lon, pa.lat), sB = navSnap(pb.lon, pb.lat);
+  const qa = portLL(pa), qb = portLL(pb);
+  const sA = navSnap(qa[0], qa[1]), sB = navSnap(qb[0], qb[1]);
   if (!sA || !sB) return { error: 'Esta rota está fora da área navegável dos dados carregados.' };
   const res = aStar(sA[0], sA[1], sB[0], sB[1]);
   if (!res || res.path.length < 2) {
@@ -2821,13 +3558,7 @@ function simulateDrift(lon0, lat0, hours, volume) {
   const speedKn = driftNm / hours;
   const compass = driftKm > 0.05 ? compassPt(bearingDeg(lon0, lat0, lon, lat)) : null;
 
-  let explanation = compass
-    ? 'Conclusão da IA: Modelo de advecção-difusão impulsionado por correntes de superfície (direção '
-      + compass + ' a ' + nf1(speedKn) + ' nós). O navio derivou ' + nf1(driftNm) + ' NM ao longo de '
-      + hours + ' horas.'
-    : 'Conclusão da IA: Modelo de advecção-difusão impulsionado por correntes de superfície — correntes '
-      + 'fracas no ponto, deriva de apenas ' + nf1(driftNm) + ' NM em ' + hours + ' horas.';
-  if (aground) explanation += ' A mancha atingiu a costa após ' + groundedHour + ' h.';
+  const explanation = driftSummaryText(hours, driftKm, compass, Math.hypot(dxKm, dyKm), aground, groundedHour);
 
   return {
     origin: { lat: lat0, lon: lon0 },
@@ -2853,19 +3584,20 @@ function focusOnSpill(sim, zoomIn) {
   const o = sim.origin, f = sim.final;
   const dLon = ((f.lon - o.lon + 540) % 360) - 180; // funciona mesmo cruzando 180°
   const cLon = normLon(o.lon + dLon / 2), cLat = (o.lat + f.lat) / 2;
+  const inset = hudLeftInset(); // área livre ao lado do card aberto
   if (!zoomIn) {
     const a = project(normLon(o.lon), o.lat), b = project(normLon(f.lon), f.lat);
-    const inView = (p) => p[0] > 40 && p[0] < W - 40 && p[1] > 40 && p[1] < H - 40;
+    const inView = (p) => p[0] > inset + 40 && p[0] < W - 40 && p[1] > 40 && p[1] < H - 40;
     if (inView(a) && inView(b)) return;
   } else {
     const rKm = sim.frames[sim.frames.length - 1].radius_km;
     const spanX = Math.abs(dLon) + 2 * rKm / (111 * Math.max(0.2, Math.cos(cLat * Math.PI / 180)));
     const spanY = Math.abs(f.lat - o.lat) + 2 * rKm / 111;
-    const fitK = Math.min(0.45 * W / Math.max(spanX, 0.05), 0.45 * H / Math.max(spanY, 0.05));
+    const fitK = Math.min(0.45 * (W - inset) / Math.max(spanX, 0.05), 0.45 * H / Math.max(spanY, 0.05));
     const nz = Math.min((OD && OD.regional) ? 120 : 16, fitK / baseK);
     if (nz > Z) { Z = nz; scaleK = Z * baseK; }
   }
-  originX = W / 2 - (cLon + 180) * scaleK;
+  originX = inset + (W - inset) / 2 - (cLon + 180) * scaleK;
   originY = H / 2 - (90 - cLat) * scaleK;
   clampView();
   updateProj();
@@ -2917,15 +3649,17 @@ function runSpillSimulation(live) {
   sim.incident_frac = frac;
   oilSpill = sim;
   spillActive = true;
+  setLayerSwitch('t-spill', true); // calcular sempre mostra a mancha, mesmo com a camada desligada
   updateDriftMetrics();
 
-  say('🚨 Incidente em ' + label + (frac != null ? ' (' + Math.round(frac * 100) + '% do trajeto)' : '') +
+  say('Incidente em ' + label + (frac != null ? ' (' + Math.round(frac * 100) + '% do trajeto)' : '') +
       ': deriva de ' + nf1(sim.drift_nm) + ' NM em ' + form.hours + ' h' +
       (sim.aground ? ' — atingiu a costa.' : '.'));
 
   focusOnSpill(sim, !live); // no clique: centraliza e aproxima o suficiente p/ ler a deriva
   drawBase();
   drawRoute();
+  checkSpillFishImpact(sim);
 }
 
 async function aiToolRequest(message, statusPrefix) {
@@ -2955,12 +3689,146 @@ async function aiToolRequest(message, statusPrefix) {
   if (data.tool === 'simular_vazamento' && data.data) {
     oilSpill = data.data;
     spillActive = false;
+    hideFishImpactAlert();
     updateDriftMetrics();
     drawBase();
   } else if (data.tool === 'prever_cardumes' && data.data) {
     fishHotspots = data.data;
     drawBase();
   }
+}
+
+// liga/desliga UMA camada de simulação e mantém a chave do card Camadas em sincronia
+function setLayerSwitch(id, on) {
+  if (id === 't-spill') showSpillLayer = on;
+  else if (id === 't-fish') showFishLayer = on;
+  const el = document.getElementById(id);
+  if (el) el.checked = on;
+  if (!on) hideSimTooltip();
+}
+
+/* ---------- Previsão de Cardume: camada global liga/desliga ---------- */
+let fishGlobalCache = null; // resposta de /api/fish-hotspots (os dados não mudam durante a sessão)
+
+function setFishButton(on) {
+  const btn = document.getElementById('ai-fish');
+  if (!btn) return;
+  btn.textContent = on ? 'Ocultar cardumes' : 'Cardume';
+  btn.setAttribute('aria-pressed', String(on));
+  const lg = document.getElementById('lg-fish');
+  if (lg) lg.hidden = !on;
+}
+
+// carrega (uma vez) a previsão global: servidor se houver, senão a pré-calculada (fish-hotspots-data.js)
+let fishGlobalLoading = null;
+function loadFishGlobal() {
+  if (fishGlobalCache) return Promise.resolve(true);
+  if (fishGlobalLoading) return fishGlobalLoading;
+  fishGlobalLoading = (async () => {
+    try {
+      if (location.protocol === 'file:') throw new Error('sem servidor');
+      const r = await fetch('/api/fish-hotspots', { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      fishGlobalCache = await r.json();
+    } catch (e) {
+      if (window.FISH_HOTSPOTS_DATA && window.FISH_HOTSPOTS_DATA.hotspots) {
+        fishGlobalCache = window.FISH_HOTSPOTS_DATA;
+      }
+    }
+    fishGlobalLoading = null;
+    return !!fishGlobalCache;
+  })();
+  return fishGlobalLoading;
+}
+
+function showFishGlobalLayer() {
+  fishHotspots = { global: true, hotspots: fishGlobalCache.hotspots || [] };
+  setLayerSwitch('t-fish', true); // só a camada de cardumes — o vazamento não é afetado
+  setFishButton(true);
+}
+
+async function toggleFishLayer() {
+  const statusEl = document.getElementById('ai-status');
+  const say = (t) => { if (statusEl) statusEl.textContent = t; };
+  if (fishHotspots && fishHotspots.global) { // já visível: desliga
+    fishHotspots = null;
+    hideSimTooltip();
+    setFishButton(false);
+    say('');
+    drawBase();
+    return;
+  }
+  if (!fishGlobalCache) say('procurando as zonas com mais peixes no globo…');
+  if (!(await loadFishGlobal())) {
+    say('Não encontrei a previsão de cardumes. Rode "python gerar_cardumes.py" ou inicie o servidor (INICIAR.bat).');
+    return;
+  }
+  showFishGlobalLayer();
+  const hs = fishHotspots.hotspots;
+  const zones = new Set(hs.map((h) => h.zone)).size;
+  say(hs.length + ' focos em ' + zones + ' zonas de ressurgência e pesca. ' +
+      'Passe o mouse (ou toque) num foco para ver espécie, temperatura e orientação de navegação.');
+  drawBase();
+}
+
+/* ---------- vazamento x zonas de cardume: detecção e alerta ambiental ---------- */
+// área (km²) da interseção de dois círculos de raios r1, r2 com centros a d km
+function circleOverlapKm2(r1, r2, d) {
+  if (d >= r1 + r2) return 0;
+  if (d <= Math.abs(r1 - r2)) return Math.PI * Math.min(r1, r2) ** 2;
+  const a = r1 * r1 * Math.acos((d * d + r1 * r1 - r2 * r2) / (2 * d * r1));
+  const b = r2 * r2 * Math.acos((d * d + r2 * r2 - r1 * r1) / (2 * d * r2));
+  const c = 0.5 * Math.sqrt((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2));
+  return a + b - c;
+}
+
+// a mancha (em qualquer hora da deriva) encosta em algum foco de cardume?
+// devolve o foco com a maior área atingida: {hotspot, area_km2, hour} ou null
+function spillFishImpact(sim, hotspots) {
+  if (!sim || !sim.frames || !hotspots || !hotspots.length) return null;
+  let best = null;
+  for (const f of sim.frames) {
+    for (const h of hotspots) {
+      const d = havKm(f.lon, f.lat, h.lon, h.lat);
+      const area = circleOverlapKm2(f.radius_km, h.radius_km || 150, d);
+      if (area > 0 && (!best || area > best.area_km2)) best = { hotspot: h, area_km2: area, hour: f.hour };
+    }
+  }
+  return best;
+}
+
+function roundAreaKm2(a) {
+  const step = a < 100 ? 1 : a < 1000 ? 10 : 100;
+  return Math.max(1, Math.round(a / step) * step);
+}
+
+function showFishImpactAlert(impact) {
+  const el = document.getElementById('alerta-vida-maritima');
+  if (!el) return;
+  document.getElementById('alerta-especie').textContent = impact.hotspot.species || 'Peixes da região';
+  document.getElementById('alerta-area').textContent = roundAreaKm2(impact.area_km2).toLocaleString('pt-BR');
+  el.hidden = false;
+}
+
+function hideFishImpactAlert() {
+  const el = document.getElementById('alerta-vida-maritima');
+  if (el) el.hidden = true;
+}
+
+// roda depois de cada simulação: se a mancha cruzar um foco, liga a camada de cardumes e mostra o alerta
+async function checkSpillFishImpact(sim) {
+  const ok = await loadFishGlobal();
+  if (oilSpill !== sim) return; // outra simulação já substituiu esta
+  const impact = ok ? spillFishImpact(sim, fishGlobalCache.hotspots) : null;
+  sim.fish_impact = impact;
+  if (!impact) { hideFishImpactAlert(); return; }
+  if (!(fishHotspots && fishHotspots.global)) showFishGlobalLayer();
+  showFishImpactAlert(impact);
+  const statusEl = document.getElementById('ai-status');
+  if (statusEl && statusEl.textContent.indexOf('zona de cardumes') < 0) {
+    statusEl.textContent += ' A mancha entrou numa zona de cardumes (' + impact.hotspot.zone + ').';
+  }
+  drawBase();
 }
 
 function bindAiPredictions() {
@@ -2973,20 +3841,30 @@ function bindAiPredictions() {
   const posWrap = document.getElementById('spill-pos-wrap');
   if (!fishBtn || !clearBtn || !runBtn || !routeSel || !pos) return;
 
-  fishBtn.addEventListener('click', () => aiToolRequest('Prever zonas de cardumes na costa', '🐟 procurando frentes de convergência…'));
-  clearBtn.addEventListener('click', () => {
-    oilSpill = null;
+  fishBtn.addEventListener('click', toggleFishLayer);
+  clearBtn.addEventListener('click', () => { // limpa só os cardumes
     fishHotspots = null;
-    spillActive = false;
-    spillCursorOrigin = null;
+    setFishButton(false);
     hideSimTooltip();
-    updateDriftMetrics();
     const statusEl = document.getElementById('ai-status');
     if (statusEl) statusEl.textContent = '';
     drawBase();
   });
 
+  // o botão de calcular chama estritamente a simulação de vazamento
   runBtn.addEventListener('click', () => runSpillSimulation(false));
+  const spillClear = document.getElementById('spill-clear');
+  if (spillClear) {
+    spillClear.addEventListener('click', () => { // limpa só a mancha/deriva
+      oilSpill = null;
+      spillActive = false;
+      spillCursorOrigin = null;
+      hideSimTooltip();
+      hideFishImpactAlert();
+      updateDriftMetrics();
+      drawBase();
+    });
+  }
 
   // depois da 1ª simulação, qualquer ajuste recalcula na hora (no máximo 1x por quadro)
   let pending = false;
@@ -2999,8 +3877,23 @@ function bindAiPredictions() {
     if (posVal) posVal.textContent = pos.value + '%';
     if (posWrap) posWrap.hidden = routeSel.value === 'cursor';
   };
+  // cenários com valores prontos (ex.: Cidade do Cabo -> Namíbia cruzando a zona de cardumes de Benguela)
+  const SPILL_SCENARIOS = { fish: { pos: 75, hours: 24, volume: 1000 } };
+  const applyScenario = () => {
+    const opt = routeSel.options[routeSel.selectedIndex];
+    const sc = opt && SPILL_SCENARIOS[opt.dataset.scenario];
+    if (!sc) return false;
+    pos.value = sc.pos;
+    document.getElementById('spill-hours').value = sc.hours;
+    document.getElementById('spill-volume').value = sc.volume;
+    syncPos();
+    runSpillSimulation(false); // simula na hora e já checa a zona de cardumes
+    return true;
+  };
   pos.addEventListener('input', () => { syncPos(); live(); });
-  routeSel.addEventListener('change', () => { syncPos(); live(); });
+  routeSel.addEventListener('change', () => { syncPos(); hideFishImpactAlert(); if (!applyScenario()) live(); });
+  const alertClose = document.getElementById('alerta-fechar');
+  if (alertClose) alertClose.addEventListener('click', hideFishImpactAlert);
   document.getElementById('spill-hours').addEventListener('input', live);
   document.getElementById('spill-volume').addEventListener('input', live);
   syncPos();
@@ -3138,71 +4031,43 @@ function bindThemeToggle() {
   });
 }
 
-/* ---------- painel recolhível (celular/tablet) ---------- */
-function bindPanelToggle() {
-  const panel = document.getElementById('panel');
-  const btn = document.getElementById('panel-toggle');
-  if (!panel || !btn) return;
-  const mq = window.matchMedia('(max-width: 640px)');
+/* ---------- HUD: barra flutuante + cards modulares (um card aberto por vez) ---------- */
+let openHudCard = null;
 
-  const setCollapsed = (collapsed) => {
-    panel.classList.toggle('collapsed', collapsed);
-    btn.setAttribute('aria-expanded', String(!collapsed));
-    btn.textContent = collapsed ? '+' : '−';
-  };
-
-  btn.addEventListener('click', () => setCollapsed(!panel.classList.contains('collapsed')));
-  setCollapsed(mq.matches);
-  mq.addEventListener('change', (e) => setCollapsed(e.matches));
+function setHudCard(id) {
+  document.querySelectorAll('.hud-card').forEach((c) => { c.hidden = c.id !== id; });
+  document.querySelectorAll('.hud-dock-btn[data-card]').forEach((b) => {
+    const on = b.dataset.card === id;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-expanded', String(on));
+  });
+  openHudCard = id;
 }
 
-/* ---------- botão ☰: painel lateral retrátil (slide-in / slide-out) ----------
-   Ao ocultar, o mapa passa a 100% da largura logo no início (um único resize) e o
-   painel desliza por cima pra fora; ao mostrar, ele desliza de volta por cima do mapa
-   e só no fim da animação volta a ocupar sua coluna. Assim o canvas nunca é esticado
-   nem realocado a cada quadro da animação. */
-function bindMenuToggle() {
-  const app = document.getElementById('app');
-  const panel = document.getElementById('panel');
-  const stage = document.getElementById('stage');
-  const btn = document.getElementById('menu-toggle');
-  if (!app || !panel || !stage || !btn) return;
-
-  let token = 0;
-  const relayout = (mutate) => {
-    const before = stage.getBoundingClientRect().left;
-    mutate();
-    const r = stage.getBoundingClientRect();
-    if (Math.abs(r.left - before) > 0.5 || Math.round(r.width) !== W) resize(before - r.left);
+function bindHud() {
+  document.querySelectorAll('.hud-dock-btn[data-card]').forEach((btn) => {
+    btn.addEventListener('click', () => setHudCard(openHudCard === btn.dataset.card ? null : btn.dataset.card));
+  });
+  const closeAndRefocus = () => {
+    const btn = document.querySelector('.hud-dock-btn[data-card="' + openHudCard + '"]');
+    setHudCard(null);
+    if (btn) btn.focus();
   };
+  document.querySelectorAll('.hud-card .card-close').forEach((b) => b.addEventListener('click', closeAndRefocus));
+  document.addEventListener('keydown', (e) => {
+    const modal = document.getElementById('route-analytics');
+    if (e.key === 'Escape' && openHudCard && (!modal || modal.hidden)) closeAndRefocus();
+  });
+}
 
-  const setHidden = (hide) => {
-    const my = ++token;
-    btn.setAttribute('aria-expanded', String(!hide));
-    if (hide) {
-      relayout(() => app.classList.add('panel-overlay'));
-      void panel.offsetWidth; // a transição parte da posição visível
-      app.classList.add('panel-hidden');
-      return;
-    }
-    app.classList.add('panel-overlay');
-    void panel.offsetWidth;
-    app.classList.remove('panel-hidden');
-
-    let finished = false;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      panel.removeEventListener('transitionend', onEnd);
-      if (my !== token) return; // clicaram de novo no meio da animação
-      relayout(() => app.classList.remove('panel-overlay'));
-    };
-    const onEnd = (e) => { if (e.target === panel && e.propertyName === 'transform') finish(); };
-    panel.addEventListener('transitionend', onEnd);
-    setTimeout(finish, 380); // sem transição (prefers-reduced-motion) o transitionend não dispara
-  };
-
-  btn.addEventListener('click', () => setHidden(!app.classList.contains('panel-hidden')));
+/* largura coberta pelo card aberto à esquerda (desktop): os enquadramentos automáticos
+   centralizam a rota/evento no espaço livre do mapa, não atrás do card */
+function hudLeftInset() {
+  if (!openHudCard || window.matchMedia('(max-width: 640px)').matches) return 0;
+  const c = document.getElementById(openHudCard);
+  if (!c) return 0;
+  const inset = c.getBoundingClientRect().right - flowCanvas.getBoundingClientRect().left + 12;
+  return W - inset >= 420 ? Math.max(0, inset) : 0;
 }
 
 /* ---------- controles ---------- */
@@ -3215,6 +4080,9 @@ function bindControls() {
 
   document.getElementById('t-sst').addEventListener('change', (e) => { showSST = e.target.checked; updateLegend(); drawBase(); drawRoute(); });
   document.getElementById('t-grat').addEventListener('change', (e) => { showGrat = e.target.checked; drawBase(); });
+  document.getElementById('t-routes').addEventListener('change', (e) => { showRouteLines = e.target.checked; drawRoute(); });
+  document.getElementById('t-spill').addEventListener('change', (e) => { setLayerSwitch('t-spill', e.target.checked); drawBase(); });
+  document.getElementById('t-fish').addEventListener('change', (e) => { setLayerSwitch('t-fish', e.target.checked); drawBase(); });
   document.getElementById('t-curr').addEventListener('change', (e) => { showCurr = e.target.checked; });
   document.getElementById('t-density').addEventListener('change', (e) => {
     const lvl = DENSITY_LEVELS[e.target.value] || DENSITY_LEVELS.alta;
@@ -3224,7 +4092,7 @@ function bindControls() {
   document.getElementById('t-navroutes').addEventListener('change', (e) => { showNavRoutes = e.target.checked; updateLegend(); drawBase(); });
   document.getElementById('t-ports').addEventListener('change', (e) => {
     showPorts = e.target.checked;
-    if (!showPorts) { hoveredPort = null; portTooltipEl.hidden = true; }
+    if (!showPorts && hoveredPort) onPortMouseOut();
     updateLegend();
     drawBase();
   });
@@ -3236,6 +4104,11 @@ function bindControls() {
   populatePortSelectors();
 
   document.getElementById('r-pick').addEventListener('click', () => {
+    // origem e destino escolhidos nos menus: traça direto; senão, escolha clicando nos portos do mapa
+    if (document.getElementById('r-origin').value && document.getElementById('r-dest').value) {
+      routeFromSelectors();
+      return;
+    }
     if (emergencyMode) setEmergencyMode(false);
     routeMode = 'A'; routeA = routeB = routePath = null;
     routeAPort = routeBPort = null;
@@ -3276,6 +4149,11 @@ function bindControls() {
     if (routeIsEmergency) computeEmergencyRoute(routeA[0], routeA[1]);
     else computeRoute();
   });
+  for (const [id, key] of [['sc-panama', 'block_panama'], ['sc-suez', 'block_suez']]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.addEventListener('change', () => { navScenario[key] = el.checked; onScenarioChange(); });
+  }
   document.querySelectorAll('input[name="r-algo"]').forEach((el) => {
     el.addEventListener('change', (e) => {
       if (e.target.checked) { routeDisplayMode = e.target.value; drawRoute(); }
@@ -3283,8 +4161,7 @@ function bindControls() {
   });
 
   bindUpdateButton();
-  bindPanelToggle();
-  bindMenuToggle();
+  bindHud();
   bindThemeToggle();
   bindRouteAnalytics();
   bindAiPredictions();
@@ -3385,34 +4262,21 @@ function bindControls() {
     const r = flowCanvas.getBoundingClientRect();
     const mx = ev.clientX - r.left, my = ev.clientY - r.top;
 
-    if (showPorts) {
-      const p = findPortAt(mx, my);
-      if (p !== hoveredPort) {
-        hoveredPort = p;
-        flowCanvas.classList.toggle('port-hover', !!p);
-      }
-      if (p) {
-        portTooltipEl.innerHTML =
-          '<span class="pt-name">' + p.name + '</span>' +
-          '<span class="pt-meta">' + p.country + ' · ' + p.type + '</span>' +
-          '<span class="pt-meta">' + fmtCoord(p.lat, p.lon) + '</span>' +
-          '<span class="pt-size">' + p.size + '</span>';
-        portTooltipEl.style.left = mx + 'px';
-        portTooltipEl.style.top = my + 'px';
-        portTooltipEl.hidden = false;
-      } else {
-        portTooltipEl.hidden = true;
-      }
-    } else if (hoveredPort) {
-      hoveredPort = null;
-      portTooltipEl.hidden = true;
+    // os marcadores são desenhados no canvas: mouseover/mouseout de cada porto são as
+    // transições de "qual porto está sob o cursor" detectadas aqui
+    const p = showPorts ? findPortAt(mx, my) : null;
+    if (p !== hoveredPort) {
+      if (hoveredPort) onPortMouseOut();
+      if (p) onPortMouseOver(p);
     }
+    if (p) positionPortCard(mx, my);
 
     if (!hoveredPort) {
       const fish = findFishHotspotAt(mx, my);
       const oil = !fish ? findOilHoverAt(mx, my) : null;
       if (fish) {
-        showSimTooltip(mx, my, 'fish', fish.title || 'ZONA DE ALTA PRODUTIVIDADE BIOLÓGICA', fish.explanation || '');
+        const pop = fishPopupText(fish);
+        showSimTooltip(mx, my, 'fish', pop.title, pop.body, pop.html);
       } else if (oil) {
         showSimTooltip(mx, my, 'oil', oil.title || 'SIMULAÇÃO DE VAZAMENTO & DERIVA', oil.explanation || '');
       } else {
@@ -3447,9 +4311,7 @@ function bindControls() {
   });
   flowCanvas.addEventListener('mouseleave', () => {
     readoutEl.textContent = '';
-    hoveredPort = null;
-    portTooltipEl.hidden = true;
-    flowCanvas.classList.remove('port-hover');
+    if (hoveredPort) onPortMouseOut();
     hideSimTooltip();
   });
 
@@ -3527,3 +4389,32 @@ async function init() {
 }
 
 init();
+
+
+/* painel "usar minha chave Gemini" no modal de análise */
+(function setupBrowserKeyUi() {
+  const init = () => {
+    const input = document.getElementById('ra-key-input');
+    const save = document.getElementById('ra-key-save');
+    const clear = document.getElementById('ra-key-clear');
+    const status = document.getElementById('ra-key-status');
+    if (!input || !save || !clear) return;
+    const show = () => {
+      let own = '';
+      try { own = localStorage.getItem(GEMINI_KEY_STORE) || ''; } catch (e) { /* sem storage */ }
+      if (status) status.textContent = own ? 'Usando a chave salva neste navegador.'
+        : (window.COPILOTO_GEMINI_KEY ? 'Usando a chave do projeto (config.js).' : 'Nenhuma chave — usando o texto local.');
+    };
+    save.addEventListener('click', () => {
+      const k = input.value.trim();
+      if (!k) return;
+      setBrowserGeminiKey(k);
+      input.value = '';
+      show();
+      if (routeA && routeB) fetchRouteVariants(routeA, routeB);
+    });
+    clear.addEventListener('click', () => { setBrowserGeminiKey(''); show(); });
+    show();
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();

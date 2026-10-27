@@ -14,6 +14,19 @@ Sistema de planejamento de rotas marítimas de custo mínimo baseado no algoritm
 
 ---
 
+## Como executar
+
+**Pelo link (GitHub Pages):** abra o endereço do site publicado. As rotas funcionam direto no navegador; para o parecer do Gemini, abra a tela *Análise da Rota* e cole sua chave em "Usar minha chave do Gemini".
+
+**Baixando o projeto:**
+- **Windows:** dois cliques em `INICIAR.bat`. Com Python instalado, sobe o servidor com IA e abre o navegador; sem Python, abre o `index.html` direto.
+- **Mac/Linux:** `./iniciar.sh`
+- Ou simplesmente abra o `index.html` no navegador.
+
+**Chave do Gemini no servidor (opcional):** crie um arquivo `.env` nesta pasta com a linha `GEMINI_API_KEY=sua_chave` (crie a chave em aistudio.google.com/apikey). O `.env` está no `.gitignore` e **nunca deve ir para o GitHub**.
+
+---
+
 ## Sobre o Projeto
 
 O sistema calcula rotas marítimas eficientes considerando as correntes oceânicas locais. Navegar em linha reta ignorando o campo vetorial de correntes resulta em maior consumo de combustível e maior tempo de travessia. O algoritmo A* adaptado encontra o caminho de custo mínimo levando em conta a velocidade efetiva da embarcação em relação à corrente local.

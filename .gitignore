@@ -1,2 +1,8 @@
+.env
+__pycache__/
+servidor_log.txt
+.landmask_cache.json
+.idea/
 *.xml
 *.iml
+.venv/
