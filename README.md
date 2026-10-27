@@ -2,15 +2,9 @@
 
 Sistema de planejamento de rotas marítimas de custo mínimo baseado no algoritmo A*, utilizando dados reais de correntes oceânicas do **Copernicus Marine Service**.
 
-<<<<<<< HEAD
 > Trabalho prático da disciplina de **Inteligência Artificial I**  
 > FHO – Fundação Hermínio Ometto | Engenharia da Computação | 2026  
 > **Autores:** Moisés H. C. da Silva (RA 114518) · Felipe Apolinário de Souza (RA 114771) · Gabriel V. Krebski (RA 115442)
-=======
-> Trabalho prático 
-> FHO – Fundação Hermínio Ometto | Engenharia da Computação | 2026  
-> **Alunos:** Moisés H. C. da Silva (RA 114518) · Felipe Apolinário de Souza (RA 114771) · Gabriel V. Krebski (RA 115442)
->>>>>>> ef85ffc4c58ee8eb4ef200b04ffbc0ec51d164a5
 
 ---
 
@@ -41,27 +35,28 @@ O sistema calcula rotas marítimas eficientes considerando as correntes oceânic
 
 ```
 projeto_oceano_ia/
-├── index.html                  ← mapa interativo (abrir no navegador)
-├── script.js                   ← algoritmo A*, física, renderização
-├── style.css                   ← estilo da interface
-├── ocean-data.js               ← dados de correntes (gerado pelo fetch_ocean.py)
-├── world-land.js               ← máscara de terra (GeoJSON compactado)
-├── world-countries.js          ← fronteiras e nomes dos países (GeoJSON compactado)
-├── fetch_ocean.py              ← baixa dados do Copernicus e gera ocean-data.js
-├── converter_dados.py          ← converte NetCDF para o formato do mapa
-├── servidor.py                 ← servidor local com botão de atualização
-├── servidor.bat                ← atalho Windows para iniciar o servidor
-├── atualizar_correntes_GLOBAL.bat  ← atualiza correntes globais (NOAA)
-├── usar_dados_REGIONAL.bat     ← usa dados regionais baixados
-<<<<<<< HEAD
-└── web/                        ← versão alternativa com pipeline Monte Carlo
-    ├── index.html
-    ├── dados.js
-    ├── rota.geojson
-    └── world-land.js
-=======
-
->>>>>>> ef85ffc4c58ee8eb4ef200b04ffbc0ec51d164a5
+├── index.html                      ← mapa interativo (abrir no navegador)
+├── script.js                       ← algoritmo A*, física, renderização
+├── style.css                       ← estilo da interface
+├── ocean-data.js                   ← dados de correntes (gerado pelo fetch_ocean.py)
+├── world-land.js                   ← máscara de terra (GeoJSON compactado)
+├── world-countries.js              ← fronteiras e nomes dos países (GeoJSON compactado)
+├── fish-hotspots-data.js           ← dados de hotspots de pesca
+├── global-ports-data.js            ← dados de portos globais
+├── config.js                       ← configuração da chave Gemini (GitHub Pages)
+├── ai_agent.py                     ← agente de IA com Copiloto e algoritmos
+├── fetch_ocean.py                  ← baixa dados do Copernicus e gera ocean-data.js
+├── converter_dados.py              ← converte NetCDF para o formato do mapa
+├── gerar_cardumes.py               ← gera dados de cardumes de peixes
+├── servidor.py                     ← servidor local com botão de atualização
+├── servidor.bat                    ← atalho Windows para iniciar o servidor
+├── INICIAR.bat                     ← inicialização automática (com ou sem Python)
+├── atualizar_correntes_GLOBAL.bat  ← atualiza correntes globais
+├── usar_dados_REGIONAL.bat         ← usa dados regionais baixados
+├── ativar_inicio_automatico.bat    ← inicia servidor automaticamente com o Windows
+├── desativar_inicio_automatico.bat ← remove o início automático
+├── iniciar.sh                      ← inicialização para Mac/Linux
+└── Relatorios/                     ← PDFs de todos os arquivos do projeto
 ```
 
 ---
