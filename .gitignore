@@ -6,3 +6,5 @@ servidor_log.txt
 *.xml
 *.iml
 .venv/
+dados-marinhos.js
+dados-marinhos_regional.js
