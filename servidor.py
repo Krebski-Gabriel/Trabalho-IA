@@ -97,6 +97,7 @@ def _load_env_file():
 _load_env_file()
 
 import ai_agent  # noqa: E402  (depois do .env: o agente le as chaves do ambiente)
+import banco     # noqa: E402  banco de dados SQLite local
 
 try:
     import google.generativeai as genai
@@ -333,6 +334,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json(200, ai_agent.generate_global_fish_hotspots())
             except Exception as e:
                 return self._json(500, {"erro": str(e)})
+        if path == "/api/banco/rotas":
+            try:
+                return self._json(200, banco.listar_rotas())
+            except Exception as e:
+                return self._json(500, {"erro": str(e)})
+        if path == "/api/banco/estatisticas":
+            try:
+                return self._json(200, banco.estatisticas())
+            except Exception as e:
+                return self._json(500, {"erro": str(e)})
         return super().do_GET()
 
     def do_POST(self):
@@ -373,8 +384,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(400, {"erro": "mensagem vazia"})
         context = body.get("context") or {}
         history = body.get("history") or []
+        rota_id = body.get("rota_id")  # id da rota ativa (enviado pelo front)
         try:
             result = ai_agent.llm_chat(message, context=context, history=history)
+            # Salva no banco: pergunta do usuário e resposta do copiloto
+            try:
+                banco.salvar_chat(rota_id, "usuario", message)
+                resposta = result.get("reply") or result.get("text") or ""
+                if resposta:
+                    banco.salvar_chat(rota_id, "copiloto", resposta)
+            except Exception:
+                pass  # banco nunca quebra o chat
             return self._json(200, result)
         except Exception as e:
             return self._json(500, {"erro": str(e)})
@@ -395,6 +415,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             )
             if not result:
                 return self._json(422, {"erro": "nao achei rota entre os pontos informados"})
+            # Salva rotas no banco (emergência: só astar; normal: as 3)
+            is_emergency = bool(body.get("emergency"))
+            try:
+                rota_id = banco.salvar_rotas(
+                    result,
+                    origem=body.get("origin_name", ""),
+                    destino=body.get("dest_name", ""),
+                    velocidade=speed_kn,
+                    emergencia=is_emergency,
+                )
+                result["rota_id"] = rota_id  # front usa para vincular o chat
+                # Salva o parecer do Copiloto IA no chat_historico (só rotas normais)
+                if not is_emergency:
+                    parecer = (result.get("llm") or {}).get("rationale", "")
+                    if parecer and rota_id:
+                        banco.salvar_chat(rota_id, "copiloto", parecer)
+            except Exception:
+                pass  # banco nunca quebra o cálculo de rota
             return self._json(200, result)
         except Exception as e:
             return self._json(500, {"erro": str(e)})
@@ -419,6 +457,7 @@ def main():
         httpd = Server(("127.0.0.1", PORT), Handler)
     except OSError as e:
         sys.exit(f"nao consegui abrir a porta {PORT}: {e}\n(tente:  python servidor.py 8001)")
+    banco.init()  # cria tabelas se não existirem
     threading.Thread(target=ai_agent.warmup, daemon=True).start()
 
     url = f"http://localhost:{PORT}/index.html"

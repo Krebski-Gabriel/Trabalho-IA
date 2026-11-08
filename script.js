@@ -2775,6 +2775,7 @@ async function fetchRouteVariants(a, b) {
         a, b, speed_kn: SHIP.kn, scenario: navScenario,
         origin_name: routeAPort ? routeAPort.name : null,
         dest_name: routeBPort ? routeBPort.name : null,
+        emergency: routeIsEmergency || false,
       }),
     });
     if (!res.ok) throw new Error('servidor ausente'); // ex.: GitHub Pages (site estático)
@@ -2783,6 +2784,7 @@ async function fetchRouteVariants(a, b) {
     if (routeVariantsKey(routeA, routeB) !== key) return; // rota mudou enquanto a resposta chegava
     if (!data.llm || data.llm.service_kn !== SHIP.kn) return; // velocidade mudou no meio do caminho
     routeVariants = prepareVariants(Object.assign({ key, source: 'server' }, data));
+    if (data.rota_id) window._rotaId = data.rota_id;
     if (!routeIsEmergency) writeRouteSummary(routeVariants);
     drawRoute();
   } catch (e) {
@@ -3673,7 +3675,7 @@ async function aiToolRequest(message, statusPrefix) {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, context: point }),
+      body: JSON.stringify({ message, context: point, rota_id: window._rotaId || null }),
     });
     data = await res.json();
   } catch (e) {
