@@ -45,6 +45,8 @@ projeto_oceano_ia/
 ├── global-ports-data.js            ← dados de portos globais
 ├── config.js                       ← configuração da chave Gemini (GitHub Pages)
 ├── ai_agent.py                     ← agente de IA com Copiloto e algoritmos
+├── banco.py                        ← integração com banco de dados MySQL
+├── navegacao_maritima.sql          ← script SQL para criar o banco de dados
 ├── fetch_ocean.py                  ← baixa dados do Copernicus e gera ocean-data.js
 ├── converter_dados.py              ← converte NetCDF para o formato do mapa
 ├── gerar_cardumes.py               ← gera dados de cardumes de peixes
@@ -76,6 +78,31 @@ python servidor.py
 ```
 
 Acesse `http://localhost:8000` no navegador.
+
+---
+
+## Banco de Dados MySQL (opcional)
+
+O servidor registra automaticamente as rotas calculadas e os pareceres do Copiloto IA em um banco MySQL local (XAMPP).
+
+**Pré-requisito (apenas uma vez):**
+
+1. Instale o [XAMPP](https://www.apachefriends.org/) e inicie o módulo **MySQL**
+2. No phpMyAdmin (`http://localhost/phpmyadmin`), execute o arquivo `navegacao_maritima.sql` para criar o banco e as tabelas
+3. Instale o conector Python:
+
+```bash
+.venv\Scripts\python.exe -m pip install pymysql
+```
+
+**Tabelas criadas:**
+
+| Tabela | Descrição |
+|---|---|
+| `rotas` | Registra cada cálculo de rota (3 registros por rota normal: comercial, A* e Copiloto IA; 1 registro para rota de emergência) |
+| `chat_historico` | Armazena o parecer gerado pelo Copiloto IA após cada cálculo de rota |
+
+O banco é **opcional** — se o MySQL não estiver ativo, o servidor funciona normalmente sem ele.
 
 ---
 
