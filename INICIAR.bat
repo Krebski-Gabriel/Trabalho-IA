@@ -2,13 +2,12 @@
 setlocal
 cd /d "%~dp0"
 title Copiloto IA - Rotas Maritimas
-set "PY="
-where python >nul 2>nul && set "PY=python"
-if not defined PY (where py >nul 2>nul && set "PY=py")
+rem prepara o Python e instala as bibliotecas sozinho (so demora na primeira vez)
+call preparar_ambiente.bat
 if defined PY (
   echo Iniciando o servidor com IA... o navegador vai abrir sozinho.
   echo Para parar, feche esta janela.
-  %PY% servidor.py %*
+  "%PY%" servidor.py %*
   pause
 ) else (
   echo Python nao encontrado neste computador.

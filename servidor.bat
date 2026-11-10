@@ -2,7 +2,12 @@
 setlocal
 cd /d "%~dp0"
 title Mapa de Correntes - servidor
-where python >nul 2>nul && (set "PY=python") || (set "PY=py")
-%PY% servidor.py %*
+call preparar_ambiente.bat
+if not defined PY (
+  echo Python nao encontrado. Instale o Python 3 e abra de novo.
+  pause
+  exit /b 1
+)
+"%PY%" servidor.py %*
 echo.
 pause

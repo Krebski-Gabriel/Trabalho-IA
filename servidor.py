@@ -102,6 +102,7 @@ _load_env_file()
 
 import ai_agent  # noqa: E402  (depois do .env: o agente le as chaves do ambiente)
 import banco     # noqa: E402  banco de dados MySQL (XAMPP)
+import atualizar_job  # noqa: E402  instalacao automatica + execucao do fetch_ocean.py
 
 try:
     import google.generativeai as genai
@@ -276,23 +277,22 @@ def _has_login():
 def _run_update(extra_args):
     cmd = [sys.executable, str(ROOT / "fetch_ocean.py"), "--source", "copernicus"] + extra_args
     with _lock:
-        _job.update(state="running", log=["$ " + " ".join(cmd)],
+        _job.update(state="running", log=[],
                     started=time.time(), finished=None, rc=None)
+
+    def log(line):
+        with _lock:
+            _job["log"].append(line)
+            _job["log"] = _job["log"][-80:]
+
     try:
-        p = subprocess.Popen(
-            cmd, cwd=str(ROOT), stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
-        )
-        for line in p.stdout:
-            line = line.rstrip()
-            if not line:
-                continue
+        # instala sozinho copernicusmarine/numpy/xarray se faltarem (so na primeira vez)
+        if not atualizar_job.garantir_pacotes(log):
             with _lock:
-                _job["log"].append(line)
-                _job["log"] = _job["log"][-80:]
-        p.wait()
-        rc = p.returncode
+                _job.update(state="error", rc=1, finished=time.time())
+            return
+        log("$ " + " ".join(cmd))
+        rc = atualizar_job.rodar(cmd, log)
 
         if rc == 0:
             reg = ROOT / "dados-marinhos.js"
@@ -351,7 +351,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path == "/api/status":
+        if path in ("/api/status", "/api/status.php"):
             with _lock:
                 snap = json.loads(json.dumps(_job))
             return self._json(200, snap)
@@ -430,7 +430,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?")[0]
         body = self._read_body()
 
-        if path == "/api/atualizar":
+        if path in ("/api/atualizar", "/api/atualizar.php"):
             return self._handle_atualizar(body)
         if path == "/api/chat":
             return self._handle_chat(body)

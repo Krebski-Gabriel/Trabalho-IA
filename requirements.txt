@@ -1,0 +1,14 @@
+# Bibliotecas Python do projeto.
+# O INICIAR.bat instala tudo sozinho num ambiente proprio (.venv) na primeira vez.
+# A mao:  python -m pip install -r requirements.txt
+
+# banco de dados MySQL (XAMPP) — historico de rotas
+pymysql
+# le a chave do Gemini do arquivo .env
+python-dotenv
+# parecer do Copiloto pelo Gemini (sem ele o Copiloto funciona offline)
+google-generativeai
+# botao "Atualizar correntes" (download do Copernicus Marine)
+copernicusmarine
+numpy
+xarray

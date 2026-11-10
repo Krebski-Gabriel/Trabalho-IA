@@ -1,0 +1,14 @@
+# Usado so quando o site e aberto pelo XAMPP (Apache). O servidor.py ignora este arquivo.
+
+# Depois de "Atualizar correntes" a pagina recarrega: sem isto o navegador pode
+# reaproveitar o ocean-data.js antigo do cache e o mapa nao muda.
+<IfModule mod_headers.c>
+  <FilesMatch "\.(js|json)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
+
+# Nao entregar pelo navegador: a chave do Gemini (.env) e os arquivos internos da atualizacao
+<FilesMatch "^(\.env|\.atualizar.*|_atualizacao\.php)$">
+  Require all denied
+</FilesMatch>

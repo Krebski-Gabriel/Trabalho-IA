@@ -13,8 +13,9 @@ Sistema de planejamento de rotas marítimas de custo mínimo baseado no algoritm
 **Pelo link (GitHub Pages):** abra o endereço do site publicado. As rotas funcionam direto no navegador; para o parecer do Gemini, abra a tela *Análise da Rota* e cole sua chave em "Usar minha chave do Gemini".
 
 **Baixando o projeto:**
-- **Windows:** dois cliques em `INICIAR.bat`. Com Python instalado, sobe o servidor com IA e abre o navegador; sem Python, abre o `index.html` direto.
-- **Mac/Linux:** `./iniciar.sh`
+- **Windows:** dois cliques em `INICIAR.bat`. Na primeira vez ele prepara tudo sozinho: cria o ambiente Python do projeto (`.venv`) e instala as bibliotecas do `requirements.txt` (leva alguns minutos). Sem Python no PC, oferece instalar pelo winget. Depois sobe o servidor com IA e abre o navegador.
+- **Mac/Linux:** `./iniciar.sh` (faz o mesmo preparo na primeira vez)
+- **Pelo XAMPP:** veja a Opção 3 abaixo.
 - Ou simplesmente abra o `index.html` no navegador.
 
 **Chave do Gemini no servidor (opcional):** crie um arquivo `.env` nesta pasta com a linha `GEMINI_API_KEY=sua_chave` (crie a chave em aistudio.google.com/apikey). O `.env` está no `.gitignore` e **nunca deve ir para o GitHub**.
@@ -52,6 +53,11 @@ projeto_oceano_ia/
 ├── gerar_cardumes.py               ← gera dados de cardumes de peixes
 ├── servidor.py                     ← servidor local com botão de atualização
 ├── servidor.bat                    ← atalho Windows para iniciar o servidor
+├── requirements.txt                ← bibliotecas Python (instaladas sozinhas pelo INICIAR.bat)
+├── preparar_ambiente.bat           ← cria o .venv e instala o requirements.txt quando preciso
+├── atualizar_job.py                ← roda a atualização das correntes em 2º plano (XAMPP)
+├── api/                            ← atualizar.php e status.php (botão de atualizar pelo XAMPP)
+├── .htaccess                       ← sem cache de .js e bloqueio do .env no Apache
 ├── INICIAR.bat                     ← inicialização automática (com ou sem Python)
 ├── atualizar_correntes_GLOBAL.bat  ← atualiza correntes globais
 ├── usar_dados_REGIONAL.bat         ← usa dados regionais baixados
@@ -78,6 +84,20 @@ python servidor.py
 ```
 
 Acesse `http://localhost:8000` no navegador.
+
+### Opção 3 — Pelo XAMPP
+
+Com a pasta do projeto em `C:\xampp\htdocs\Trabalho-IA`, ligue o **Apache** no XAMPP Control Panel e acesse `http://localhost/Trabalho-IA/`.
+
+O botão **Atualizar correntes (Copernicus)** funciona por aqui também: o PHP (`api/atualizar.php`) dispara o `atualizar_job.py` em segundo plano, e o `api/status.php` mostra o andamento. Se faltar alguma biblioteca (`copernicusmarine`, `numpy`, `xarray`), o próprio botão instala na primeira vez. Só o login no Copernicus é manual, uma vez só:
+
+```bash
+copernicusmarine login
+```
+
+- O Apache precisa ser iniciado pelo **XAMPP Control Panel** (com o seu usuário do Windows), e não como serviço; como serviço ele não enxerga o seu Python nem o seu login do Copernicus.
+- Se aparecer "Python não encontrado", coloque o caminho do `python.exe` em `PYTHON_PATH`, no topo de `api/_atualizacao.php`.
+- As rotas pelo servidor de IA, o Copiloto e o Histórico (MySQL) continuam precisando do `python servidor.py` (Opção 2).
 
 ---
 

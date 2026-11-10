@@ -11,9 +11,15 @@ echo   - gera o ocean-data.js
 echo ================================================
 echo.
 
-where python >nul 2>nul && (set "PY=python") || (set "PY=py")
+rem prepara o Python e instala as bibliotecas sozinho (so demora na primeira vez)
+call preparar_ambiente.bat
+if not defined PY (
+  echo Python nao encontrado. Instale o Python 3 e rode de novo.
+  set "ERR=1"
+  goto :fim
+)
 
-%PY% fetch_ocean.py --source copernicus %*
+"%PY%" fetch_ocean.py --source copernicus %*
 set "ERR=%ERRORLEVEL%"
 if not "%ERR%"=="0" goto :fim
 

@@ -1,0 +1,5 @@
+# Arquivos do Windows sempre com quebra de linha CRLF (com LF o cmd.exe pode errar goto/call)
+*.bat text eol=crlf
+*.vbs text eol=crlf
+# scripts de Mac/Linux sempre com LF
+*.sh text eol=lf

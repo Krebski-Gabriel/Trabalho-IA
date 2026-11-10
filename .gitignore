@@ -8,3 +8,6 @@ servidor_log.txt
 .venv/
 dados-marinhos.js
 dados-marinhos_regional.js
+.atualizar_status.json
+.atualizar_status.json.tmp
+.atualizar.lock

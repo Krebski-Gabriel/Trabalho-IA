@@ -3930,6 +3930,11 @@ function updateLegend() {
 }
 
 /* ---------- botão "Atualizar correntes" (precisa do servidor local) ---------- */
+/* caminhos relativos: funcionam tanto pelo XAMPP (http://localhost/Trabalho-IA/, onde o
+   Apache roda os .php da pasta api/) quanto pelo servidor.py (http://localhost:8000/,
+   que responde nesses mesmos caminhos) */
+const UPDATE_API = { status: 'api/status.php', atualizar: 'api/atualizar.php' };
+
 function bindUpdateButton() {
   const btn = document.getElementById('d-update');
   const st = document.getElementById('d-status');
@@ -3937,13 +3942,13 @@ function bindUpdateButton() {
 
   if (location.protocol === 'file:') {
     btn.disabled = true;
-    st.textContent = 'Para atualizar pelo site, abra assim:\n  python servidor.py';
+    st.textContent = 'Para atualizar pelo site, abra pelo XAMPP\n(http://localhost/Trabalho-IA/) ou rode:  python servidor.py';
     return;
   }
 
   const poll = async () => {
     try {
-      const j = await (await fetch('/api/status', { cache: 'no-store' })).json();
+      const j = await (await fetch(UPDATE_API.status, { cache: 'no-store' })).json();
       const last = j.log && j.log.length ? j.log[j.log.length - 1] : '';
       if (j.state === 'running') {
         st.textContent = 'atualizando…\n' + last;
@@ -3967,22 +3972,23 @@ function bindUpdateButton() {
     btn.disabled = true;
     st.textContent = 'iniciando…';
     try {
-      const r = await fetch('/api/atualizar', {
+      const r = await fetch(UPDATE_API.atualizar, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
       });
       if (r.status === 202) { poll(); return; }
-      const j = await r.json().catch(() => ({}));
-      st.textContent = j.erro || ('erro ' + r.status);
+      const j = await r.json().catch(() => null);
+      st.textContent = j ? (j.erro || ('erro ' + r.status))
+        : (r.ok ? 'o servidor não executou o PHP. Abra pelo XAMPP com o Apache ligado.' : 'erro ' + r.status);
       btn.disabled = false;
     } catch (e) {
-      st.textContent = 'sem servidor. Abra com:\n  python servidor.py';
+      st.textContent = 'sem servidor. Abra pelo XAMPP (Apache ligado)\nou rode:  python servidor.py';
       btn.disabled = false;
     }
   });
 
-  fetch('/api/status', { cache: 'no-store' })
+  fetch(UPDATE_API.status, { cache: 'no-store' })
     .then((r) => r.json())
     .then((j) => { if (j.state === 'running') { btn.disabled = true; poll(); } })
     .catch(() => {});
