@@ -3,7 +3,7 @@
 --
 -- Pré-requisito: ter o XAMPP instalado com o MySQL rodando.
 -- Após criar o banco, instale o conector Python:
---   .venv\Scripts\python.exe -m pip install pymysql
+--   python -m pip install pymysql
 
 CREATE DATABASE IF NOT EXISTS navegacao_maritima
   CHARACTER SET utf8mb4
@@ -34,5 +34,15 @@ CREATE TABLE IF NOT EXISTS chat_historico (
     data_hora DATETIME NOT NULL,
     remetente ENUM('usuario', 'copiloto') NOT NULL,
     mensagem  TEXT NOT NULL,
-    FOREIGN KEY (rota_id) REFERENCES rotas(id)
+    FOREIGN KEY (rota_id) REFERENCES rotas(id) ON DELETE CASCADE
 );
+
+-- Banco criado com a versão antiga deste script (sem ON DELETE CASCADE)?
+-- Não é obrigatório mudar: o banco.py já apaga o chat antes de apagar a rota.
+-- Se quiser deixar igual ao script novo, rode no phpMyAdmin (aba SQL):
+--   SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
+--    WHERE TABLE_SCHEMA = 'navegacao_maritima' AND TABLE_NAME = 'chat_historico'
+--      AND REFERENCED_TABLE_NAME = 'rotas';
+--   ALTER TABLE chat_historico DROP FOREIGN KEY <nome_que_apareceu_acima>;
+--   ALTER TABLE chat_historico ADD CONSTRAINT fk_chat_rota
+--     FOREIGN KEY (rota_id) REFERENCES rotas(id) ON DELETE CASCADE;

@@ -28,7 +28,11 @@ import subprocess
 import sys
 import os
 import json
+import re
+import urllib.parse
 import threading
+from datetime import date, datetime
+from decimal import Decimal
 import time
 import webbrowser
 from pathlib import Path
@@ -97,7 +101,7 @@ def _load_env_file():
 _load_env_file()
 
 import ai_agent  # noqa: E402  (depois do .env: o agente le as chaves do ambiente)
-import banco     # noqa: E402  banco de dados SQLite local
+import banco     # noqa: E402  banco de dados MySQL (XAMPP)
 
 try:
     import google.generativeai as genai
@@ -307,12 +311,34 @@ def _run_update(extra_args):
             _job["log"].append("ERRO: " + str(e))
 
 
+def _json_default(o):
+    """O MySQL devolve DATETIME e DECIMAL, que o json.dumps nao conhece."""
+    if isinstance(o, (datetime, date)):
+        return o.strftime("%Y-%m-%d %H:%M:%S") if isinstance(o, datetime) else o.isoformat()
+    if isinstance(o, Decimal):
+        return float(o)
+    raise TypeError(f"{type(o).__name__} nao serializavel")
+
+
+def _erro_banco(e):
+    """Mensagem curta para o site quando o MySQL do XAMPP nao responde."""
+    txt = str(e)
+    if "2003" in txt or "Can't connect" in txt:
+        return "MySQL desligado: ligue o MySQL no painel do XAMPP."
+    if "1049" in txt or "Unknown database" in txt:
+        return "Banco navegacao_maritima nao existe: importe o navegacao_maritima.sql no phpMyAdmin."
+    return txt
+
+
+_ROTA_ID_RE = re.compile(r"^/api/banco/rotas/(\d+)$")
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **k):
         super().__init__(*a, directory=str(ROOT), **k)
 
     def _json(self, code, obj):
-        body = json.dumps(obj).encode("utf-8")
+        body = json.dumps(obj, default=_json_default).encode("utf-8")
         try:
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -335,24 +361,74 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 return self._json(500, {"erro": str(e)})
         if path == "/api/banco/rotas":
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
-                return self._json(200, banco.listar_rotas())
+                limite = int((q.get("limite") or ["50"])[0])
+            except ValueError:
+                limite = 50
+            busca = (q.get("busca") or [""])[0].strip()[:100]
+            try:
+                return self._json(200, banco.listar_rotas(limite, busca))
             except Exception as e:
-                return self._json(500, {"erro": str(e)})
+                return self._json(500, {"erro": _erro_banco(e)})
+        m = _ROTA_ID_RE.match(path)
+        if m:
+            try:
+                rota = banco.obter_rota(int(m.group(1)))
+            except Exception as e:
+                return self._json(500, {"erro": _erro_banco(e)})
+            if rota is None:
+                return self._json(404, {"erro": "rota nao encontrada"})
+            return self._json(200, rota)
         if path == "/api/banco/estatisticas":
             try:
                 return self._json(200, banco.estatisticas())
             except Exception as e:
-                return self._json(500, {"erro": str(e)})
+                return self._json(500, {"erro": _erro_banco(e)})
         return super().do_GET()
 
-    def do_POST(self):
-        path = self.path.split("?")[0]
+    def _read_body(self):
         n = int(self.headers.get("Content-Length") or 0)
         try:
             body = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             body = {}
+        return body if isinstance(body, dict) else {}
+
+    # ---- CRUD: Update ----
+    def do_PUT(self):
+        path = self.path.split("?")[0]
+        body = self._read_body()
+        m = _ROTA_ID_RE.match(path)
+        if not m:
+            return self._json(404, {"erro": "rota desconhecida"})
+        try:
+            rota = banco.atualizar_rota(int(m.group(1)), body)
+        except ValueError as e:
+            return self._json(400, {"erro": str(e)})
+        except Exception as e:
+            return self._json(500, {"erro": _erro_banco(e)})
+        if rota is None:
+            return self._json(404, {"erro": "rota nao encontrada"})
+        return self._json(200, rota)
+
+    # ---- CRUD: Delete ----
+    def do_DELETE(self):
+        path = self.path.split("?")[0]
+        m = _ROTA_ID_RE.match(path)
+        if not m:
+            return self._json(404, {"erro": "rota desconhecida"})
+        try:
+            ok = banco.excluir_rota(int(m.group(1)))
+        except Exception as e:
+            return self._json(500, {"erro": _erro_banco(e)})
+        if not ok:
+            return self._json(404, {"erro": "rota nao encontrada"})
+        return self._json(200, {"ok": True})
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        body = self._read_body()
 
         if path == "/api/atualizar":
             return self._handle_atualizar(body)

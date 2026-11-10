@@ -2784,7 +2784,7 @@ async function fetchRouteVariants(a, b) {
     if (routeVariantsKey(routeA, routeB) !== key) return; // rota mudou enquanto a resposta chegava
     if (!data.llm || data.llm.service_kn !== SHIP.kn) return; // velocidade mudou no meio do caminho
     routeVariants = prepareVariants(Object.assign({ key, source: 'server' }, data));
-    if (data.rota_id) window._rotaId = data.rota_id;
+    if (data.rota_id) { window._rotaId = data.rota_id; refreshHistoryIfOpen(); }
     if (!routeIsEmergency) writeRouteSummary(routeVariants);
     drawRoute();
   } catch (e) {
@@ -3988,6 +3988,253 @@ function bindUpdateButton() {
     .catch(() => {});
 }
 
+/* ---------- Histórico de rotas: CRUD no MySQL via servidor.py ----------
+   Read   GET    /api/banco/rotas?busca=…   GET /api/banco/rotas/<id>   GET /api/banco/estatisticas
+   Update PUT    /api/banco/rotas/<id>  {origem, destino}
+   Delete DELETE /api/banco/rotas/<id>
+   (o Create acontece sozinho no servidor, a cada rota calculada e mensagem do Copiloto) */
+const HIST_TIPOS = {
+  comercial: 'Comercial',
+  astar: 'A*',
+  copiloto_ia: 'Copiloto IA',
+};
+let histSearchTimer = null;
+let histLoadSeq = 0;
+
+function histFmt(n, dec) {
+  const v = Number(n) || 0;
+  return v.toLocaleString('pt-BR', { minimumFractionDigits: dec || 0, maximumFractionDigits: dec || 0 });
+}
+
+function histFmtDate(s) {
+  // "2026-11-10 13:27:50" -> "10/11/2026 13:27"
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(s || ''));
+  return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}` : String(s || '');
+}
+
+async function histApi(path, opts) {
+  const res = await fetch('/api/banco/' + path, Object.assign({ cache: 'no-store' }, opts || {}));
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.erro || ('erro ' + res.status));
+  return data;
+}
+
+function histSetStatus(msg) {
+  const st = document.getElementById('h-status');
+  if (st) st.textContent = msg || '';
+}
+
+function histEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text != null) el.textContent = text; // textContent: nada vindo do banco vira HTML
+  return el;
+}
+
+async function loadHistory() {
+  const list = document.getElementById('h-list');
+  if (!list) return;
+  if (location.protocol === 'file:') {
+    histSetStatus('O histórico fica no MySQL e precisa do servidor. Abra assim:\n  python servidor.py');
+    return;
+  }
+  const seq = ++histLoadSeq;
+  const busca = (document.getElementById('h-search').value || '').trim();
+  histSetStatus('carregando…');
+  try {
+    const [rows, stats] = await Promise.all([
+      histApi('rotas?limite=100' + (busca ? '&busca=' + encodeURIComponent(busca) : '')),
+      histApi('estatisticas'),
+    ]);
+    if (seq !== histLoadSeq) return; // chegou uma busca mais nova
+    renderHistoryStats(stats);
+    renderHistoryList(rows, busca);
+  } catch (e) {
+    if (seq !== histLoadSeq) return;
+    list.replaceChildren();
+    document.getElementById('h-stats').hidden = true;
+    histSetStatus(/Failed to fetch|NetworkError/i.test(e.message)
+      ? 'sem servidor. Abra com:\n  python servidor.py'
+      : e.message);
+  }
+}
+
+function renderHistoryStats(s) {
+  document.getElementById('h-stats').hidden = false;
+  document.getElementById('h-st-calc').textContent = histFmt(s.total_calculos);
+  document.getElementById('h-st-co2').textContent = histFmt(s.co2_total_evitado, 1);
+  document.getElementById('h-st-usd').textContent = histFmt(s.economia_total_usd);
+}
+
+function renderHistoryList(rows, busca) {
+  const list = document.getElementById('h-list');
+  list.replaceChildren();
+  if (!rows.length) {
+    histSetStatus(busca ? 'Nenhuma rota encontrada para "' + busca + '".'
+      : 'Nenhuma rota salva ainda. Calcule uma rota no card Rotas e ela aparece aqui.');
+    return;
+  }
+  histSetStatus('');
+  rows.forEach((r) => list.appendChild(buildHistoryItem(r)));
+}
+
+function buildHistoryItem(r) {
+  const li = histEl('li', 'hist-item');
+  li.dataset.id = r.id;
+
+  const top = histEl('div', 'hist-top');
+  const title = histEl('div', 'hist-title');
+  title.append(
+    histEl('span', 'hist-port', r.origem || 'ponto no mar'),
+    histEl('span', 'hist-arrow', '→'),
+    histEl('span', 'hist-port', r.destino || '—'),
+  );
+  top.append(title, histEl('span', 'hist-badge hist-badge--' + r.tipo_rota, HIST_TIPOS[r.tipo_rota] || r.tipo_rota));
+
+  const meta = histEl('div', 'hist-meta',
+    `#${r.id} · ${histFmtDate(r.data_calculo)} · ${histFmt(r.velocidade_nos)} nós`);
+  const nums = histEl('div', 'hist-nums',
+    `${histFmt(r.distancia_nm)} nm · ${histFmt(r.duracao_horas, 1)} h · ${histFmt(r.combustivel_tons, 1)} t combustível`
+    + (Number(r.co2_evitado_tons) > 0 ? ` · ${histFmt(r.co2_evitado_tons, 1)} t CO₂ evitado` : ''));
+
+  const actions = histEl('div', 'hist-actions');
+  const bEdit = histEl('button', 'btn-ghost', 'Editar');
+  const bDel = histEl('button', 'btn-ghost hist-del', 'Excluir');
+  bEdit.type = bDel.type = 'button';
+  actions.append(bEdit, bDel);
+  if (Number(r.total_chat) > 0) {
+    const bChat = histEl('button', 'btn-ghost', `Chat (${r.total_chat})`);
+    bChat.type = 'button';
+    bChat.setAttribute('aria-expanded', 'false');
+    bChat.addEventListener('click', () => toggleHistoryChat(li, r.id, bChat));
+    actions.prepend(bChat);
+  }
+
+  bEdit.addEventListener('click', () => startHistoryEdit(li, r));
+  bDel.addEventListener('click', () => confirmHistoryDelete(li, r));
+
+  li.append(top, meta, nums, actions);
+  return li;
+}
+
+/* ---- Read (detalhe): mensagens do chat vinculadas à rota ---- */
+async function toggleHistoryChat(li, id, btn) {
+  const open = li.querySelector('.hist-chat');
+  if (open) { open.remove(); btn.setAttribute('aria-expanded', 'false'); return; }
+  btn.disabled = true;
+  try {
+    const rota = await histApi('rotas/' + id);
+    const box = histEl('div', 'hist-chat');
+    rota.chat.forEach((m) => {
+      const msg = histEl('div', 'hist-msg hist-msg--' + m.remetente);
+      msg.append(
+        histEl('div', 'hist-msg-who', (m.remetente === 'usuario' ? 'Você' : 'Copiloto') + ' · ' + histFmtDate(m.data_hora)),
+        histEl('div', 'hist-msg-txt', m.mensagem),
+      );
+      box.appendChild(msg);
+    });
+    li.appendChild(box);
+    btn.setAttribute('aria-expanded', 'true');
+  } catch (e) {
+    histSetStatus(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---- Update: edição de origem/destino no próprio item ---- */
+function startHistoryEdit(li, r) {
+  const form = histEl('form', 'hist-edit');
+  const mkField = (label, value) => {
+    const lab = histEl('label', 'field', label);
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.maxLength = 100;
+    inp.value = value || '';
+    lab.appendChild(inp);
+    return [lab, inp];
+  };
+  const [lO, iO] = mkField('Origem', r.origem);
+  const [lD, iD] = mkField('Destino', r.destino);
+  const row = histEl('div', 'btn-row');
+  const bSave = histEl('button', 'btn-primary', 'Salvar');
+  const bCancel = histEl('button', 'btn-ghost', 'Cancelar');
+  bSave.type = 'submit';
+  bCancel.type = 'button';
+  row.append(bSave, bCancel);
+  form.append(lO, lD, row);
+
+  const original = Array.from(li.childNodes);
+  li.replaceChildren(form);
+  iO.focus();
+
+  bCancel.addEventListener('click', () => li.replaceChildren(...original));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    bSave.disabled = bCancel.disabled = true;
+    try {
+      const novo = await histApi('rotas/' + r.id, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ origem: iO.value.trim(), destino: iD.value.trim() }),
+      });
+      novo.total_chat = r.total_chat;
+      li.replaceWith(buildHistoryItem(novo));
+      histSetStatus(`Rota #${r.id} atualizada.`);
+    } catch (err) {
+      histSetStatus(err.message);
+      bSave.disabled = bCancel.disabled = false;
+    }
+  });
+}
+
+/* ---- Delete: confirmação no próprio item ---- */
+function confirmHistoryDelete(li, r) {
+  const actions = li.querySelector('.hist-actions');
+  const original = Array.from(actions.childNodes);
+  const ask = histEl('span', 'hist-ask',
+    Number(r.total_chat) > 0 ? `Excluir #${r.id} e ${r.total_chat} msg. de chat?` : `Excluir #${r.id}?`);
+  const bYes = histEl('button', 'btn-ghost hist-del', 'Sim, excluir');
+  const bNo = histEl('button', 'btn-ghost', 'Não');
+  bYes.type = bNo.type = 'button';
+  actions.replaceChildren(ask, bYes, bNo);
+  bNo.focus();
+
+  bNo.addEventListener('click', () => actions.replaceChildren(...original));
+  bYes.addEventListener('click', async () => {
+    bYes.disabled = bNo.disabled = true;
+    try {
+      await histApi('rotas/' + r.id, { method: 'DELETE' });
+      if (window._rotaId === r.id) window._rotaId = null; // o chat não aponta mais para uma rota apagada
+      li.remove();
+      histSetStatus(`Rota #${r.id} excluída.`);
+      histApi('estatisticas').then(renderHistoryStats).catch(() => {});
+      if (!document.querySelector('#h-list .hist-item')) loadHistory();
+    } catch (err) {
+      histSetStatus(err.message);
+      actions.replaceChildren(...original);
+    }
+  });
+}
+
+/* chamado depois que o servidor salva uma rota nova */
+function refreshHistoryIfOpen() {
+  if (openHudCard === 'card-history') loadHistory();
+}
+
+function bindHistory() {
+  const card = document.getElementById('card-history');
+  const btn = document.querySelector('.hud-dock-btn[data-card="card-history"]');
+  if (!card || !btn) return;
+  // o bindHud já abriu/fechou o card; se ficou aberto, carrega a lista
+  btn.addEventListener('click', () => { if (!card.hidden) loadHistory(); });
+  document.getElementById('h-refresh').addEventListener('click', loadHistory);
+  document.getElementById('h-search').addEventListener('input', () => {
+    clearTimeout(histSearchTimer);
+    histSearchTimer = setTimeout(loadHistory, 300);
+  });
+}
+
 /* ---------- tema claro/escuro ---------- */
 function isDarkActive() {
   const t = document.documentElement.getAttribute('data-theme');
@@ -4164,6 +4411,7 @@ function bindControls() {
 
   bindUpdateButton();
   bindHud();
+  bindHistory();
   bindThemeToggle();
   bindRouteAnalytics();
   bindAiPredictions();
