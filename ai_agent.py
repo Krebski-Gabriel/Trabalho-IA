@@ -1,24 +1,5 @@
 #!/usr/bin/env python3
-"""
-ai_agent.py -- motor de rotas (Padrao / A* / Copiloto IA) e ferramentas do
-Copiloto IA Maritimo, usado pelo servidor.py nos endpoints /api/route e /api/chat.
 
-100% stdlib (sem numpy/pandas). Le os MESMOS arquivos que o navegador ja usa
-para nao inventar dado que o mapa nao esteja mostrando:
-  - correntes: dados-marinhos.js (window.MARINE_DATA, Copernicus regional) ou,
-    na falta dele, ocean-data.js (window.OCEAN_DATA, global NOAA CoastWatch).
-  - temperatura (p/ prever_cardumes): ocean-data.js -> sst, se existir.
-  - terra: world-land.js (GeoJSON) -> mascara de navegacao construida uma vez
-    e cacheada em disco (.landmask_cache.json).
-
-Integracao LLM (Gemini, lista MODELOS_GEMINI com fallback, OU OpenAI gpt-4o-mini, via
-GEMINI_API_KEY / OPENAI_API_KEY): usa chamadas REST cruas (urllib), sem
-depender de nenhum SDK. O "tool calling" e feito por roteamento em JSON: o
-prompt de sistema pede pro modelo responder com {"tool": "...", "args": {...}}
-quando precisar de uma ferramenta, ou {"tool": null, "reply": "..."} numa
-conversa normal -- funciona igual nos dois provedores, sem depender do
-formato nativo (diferente) de function-calling de cada um.
-"""
 import base64
 import heapq
 import json

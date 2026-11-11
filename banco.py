@@ -1,21 +1,3 @@
-r"""
-banco.py — Banco de dados MySQL para o projeto de navegação marítima.
-
-Tabelas:
-  rotas          — cada cálculo de rota (3 registros por cálculo: comercial, astar, copiloto_ia)
-  chat_historico — mensagens trocadas com o Copiloto IA
-
-CRUD:
-  Create  salvar_rotas(), salvar_chat()        (automático ao calcular rota / conversar)
-  Read    listar_rotas(), obter_rota(), estatisticas()
-  Update  atualizar_rota()
-  Delete  excluir_rota()
-
-Requisito:
-  python -m pip install pymysql
-  (e o MySQL do XAMPP ligado, com o navegacao_maritima.sql importado)
-"""
-
 from datetime import datetime
 
 try:

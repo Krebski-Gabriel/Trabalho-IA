@@ -1,24 +1,5 @@
 #!/usr/bin/env python3
-"""
-atualizar_job.py — roda o download das correntes em segundo plano e grava o
-andamento em .atualizar_status.json (lido por api/status.php).
 
-E o que o botao "Atualizar correntes" usa quando o site e aberto pelo XAMPP
-(Apache + PHP). O api/atualizar.php dispara:
-
-    python atualizar_job.py [--date YYYY-MM-DD] [--no-sst]
-
-que:
-  1. instala sozinho o que faltar para o download (copernicusmarine, numpy,
-     xarray) — so na primeira vez, demora alguns minutos;
-  2. roda  python fetch_ocean.py --source copernicus;
-  3. ao terminar com sucesso, faz o mesmo que o servidor.py: renomeia
-     dados-marinhos.js para dados-marinhos_regional.js para o mapa passar a
-     usar os dados globais novos.
-
-O servidor.py tambem usa garantir_pacotes() daqui no botao dele.
-Pode ser rodado a mao no terminal para testar.
-"""
 import importlib.util
 import json
 import os

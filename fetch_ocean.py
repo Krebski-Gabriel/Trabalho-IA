@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""
-Gera o arquivo ocean-data.js (corrente de superfície u/v em m/s + SST em °C)
-que o mapa carrega.
-
-Duas fontes:
-
-  python fetch_ocean.py                 # NOAA CoastWatch (ERDDAP, sem login)
-  python fetch_ocean.py --source copernicus
-
---source copernicus  usa o Copernicus Marine (o mesmo que você abre no site).
-   Antes, uma vez só:
-       pip install copernicusmarine
-       copernicusmarine login          # conta gratuita em marine.copernicus.eu
-   Produto usado: cmems_mod_glo_phy_anfc_0.083deg_P1D-m  (uo, vo, thetao).
-
-O formato de saída é sempre o mesmo, então o site não muda.
-"""
 import argparse, base64, io, os, struct, sys, urllib.request, urllib.parse, csv, datetime
 
 OUT = "ocean-data.js"

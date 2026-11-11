@@ -1,27 +1,5 @@
 #!/usr/bin/env python3
-"""
-Servidor local do mapa de correntes.
 
-    python servidor.py [porta]        (padrao: 8000)
-
-Chave do Gemini: NUNCA gravada neste arquivo. Ela e lida da variavel de ambiente
-GEMINI_API_KEY ou de um arquivo .env nesta pasta (linha  GEMINI_API_KEY=sua_chave ),
-carregado com python-dotenv se estiver instalado. Sem chave, o Copiloto funciona em
-modo de simulacao otimizada offline. Para definir a variavel no sistema:
-    Windows (so esta janela):   set GEMINI_API_KEY=sua_chave
-    Windows (permanente):       setx GEMINI_API_KEY "sua_chave"   (abra um terminal novo depois)
-    Linux/macOS:                export GEMINI_API_KEY=sua_chave
-
-Abre  http://localhost:8000/index.html  no navegador e serve os arquivos
-da pasta. Com o site aberto por aqui (e nao por file://), o botao
-"Atualizar correntes" funciona: ele chama /api/atualizar, que roda
-    python fetch_ocean.py --source copernicus
-no seu proprio PC e, ao terminar, o site recarrega com os dados novos.
-
-Pre-requisito (uma vez): ter feito login no Copernicus. Se nunca fez, rode
-no terminal:  python fetch_ocean.py --source copernicus   (ele pergunta
-usuario/senha e guarda).
-"""
 import http.server
 import socketserver
 import subprocess
@@ -41,7 +19,7 @@ ROOT = Path(__file__).resolve().parent
 
 
 class _Tee:
-    """Duplica o que sai no terminal em servidor_log.txt (diagnostico do Gemini)."""
+
     def __init__(self, stream, path):
         self._s = stream
         self._f = open(path, "a", encoding="utf-8", buffering=1)
@@ -71,8 +49,7 @@ except Exception:
 
 
 def _load_env_file():
-    """Carrega ROOT/.env (GEMINI_API_KEY, OPENAI_API_KEY...) sem sobrescrever variaveis ja
-    definidas no ambiente. Usa python-dotenv se instalado; senao, um leitor simples KEY=VALOR."""
+
     env_path = ROOT / ".env"
     if not env_path.is_file():
         return

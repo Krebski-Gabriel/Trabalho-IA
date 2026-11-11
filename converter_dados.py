@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""
-Le dados de corrente de superficie (Copernicus Marine, variaveis uo/vo em m/s)
-e gera o arquivo  dados-marinhos.js , carregado pelo index.html como
-window.MARINE_DATA.
 
-    python converter_dados.py                       # usa o padrao abaixo
-    python converter_dados.py caminho/arquivo.nc    # NetCDF (uo, vo)
-    python converter_dados.py caminho/arquivo.xlsx  # planilha (time,depth,latitude,longitude,uo,vo)
-
-Saida: uma grade regular lat/lon por dia disponivel na fonte. Celulas de terra
-(NaN) viram 0. Nao ha temperatura -> o mapa mantem a SST estilizada (modelo).
-"""
 import sys, os, io, base64, struct, math
 import numpy as np
 

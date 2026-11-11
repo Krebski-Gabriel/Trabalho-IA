@@ -1,6 +1,4 @@
-"""Gera fish-hotspots-data.js: a previsao global de cardumes ja calculada, para o mapa
-funcionar sem o servidor Python (index.html aberto direto ou GitHub Pages).
-Rode de novo depois de atualizar os dados de correntes:   python gerar_cardumes.py"""
+
 import json
 from pathlib import Path
 
